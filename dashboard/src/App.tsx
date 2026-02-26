@@ -177,7 +177,6 @@ const formatMoney = (n: number) => {
 
 // DEX/CEX Exchange classification
 const DEX_EXCHANGES = ['dydx', 'hyperliquid', 'gmx', 'jupiter', 'flash'];
-const _CEX_EXCHANGES = ['binance', 'bybit', 'okx', 'bitget', 'gateio', 'mexc', 'kucoin', 'kraken'];
 
 const isDeX = (exchange: string) => DEX_EXCHANGES.includes(exchange.toLowerCase());
 
