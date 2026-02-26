@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ArrowLeft, RefreshCw, ExternalLink, Clock, TrendingUp, Cpu, Globe, Newspaper } from 'lucide-react'
+import { ArrowLeft, RefreshCw, ExternalLink, Clock, Globe, Newspaper } from 'lucide-react'
 
 interface NewsArticle {
   id: string

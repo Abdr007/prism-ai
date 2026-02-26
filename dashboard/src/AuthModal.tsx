@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X, Mail, Wallet, Chrome, Twitter, Loader2, Check, AlertCircle } from 'lucide-react'
+import { X, Mail, Chrome, Twitter, Loader2, Check, AlertCircle } from 'lucide-react'
 
 interface AuthModalProps {
   isOpen: boolean

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import {
-  Activity, Zap, Shield, TrendingUp, ChevronRight, Sparkles,
-  Globe, Lock, BarChart3, Cpu, Network, AlertTriangle,
-  ArrowRight, Check, Server, Layers, Eye, Target
+  Activity, Zap, Shield, ChevronRight, Sparkles,
+  Lock, Cpu, Network, AlertTriangle,
+  ArrowRight, Check, Server, Eye, Target
 } from 'lucide-react'
 
 interface LandingPageProps {
@@ -46,7 +46,7 @@ function FloatingOrb({ color, size, x, y, delay }: { color: string; size: number
 }
 
 // Exchange logo placeholder
-function ExchangeLogo({ name }: { name: string }) {
+function _ExchangeLogo({ name }: { name: string }) {
   return (
     <div className="w-12 h-12 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-xs font-bold text-slate-400 hover:bg-white/10 hover:border-white/20 transition-all">
       {name.slice(0, 2).toUpperCase()}

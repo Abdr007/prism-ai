@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   Activity, Wifi, WifiOff, RefreshCw, TrendingUp, TrendingDown,
-  AlertTriangle, Eye, Target, Layers, GitBranch, Radio, ArrowLeft,
+  AlertTriangle, Eye, Target, GitBranch, Radio, ArrowLeft,
   LogIn, User as UserIcon, Crown, Gauge, Zap, ShieldAlert, BarChart2, Newspaper, Clock
 } from 'lucide-react'
 import { createChart, ColorType, IChartApi, ISeriesApi, AreaData, Time, AreaSeries } from 'lightweight-charts'
@@ -141,7 +141,7 @@ const FACTOR_CONFIG: Record<string, { icon: string; label: string; unit: string;
 }
 
 // Get risk level explanation for beginners
-const getRiskExplanation = (level: string, score: number) => {
+const getRiskExplanation = (_level: string, score: number) => {
   if (score >= 80) return { emoji: '🚨', text: 'DANGER ZONE - High chance of sudden price crash or spike. Consider reducing positions.' }
   if (score >= 60) return { emoji: '⚠️', text: 'CAUTION - Market is stressed. Liquidations are more likely. Trade carefully.' }
   if (score >= 40) return { emoji: '👀', text: 'WATCH - Some risk factors elevated. Monitor closely before big trades.' }
@@ -177,7 +177,7 @@ const formatMoney = (n: number) => {
 
 // DEX/CEX Exchange classification
 const DEX_EXCHANGES = ['dydx', 'hyperliquid', 'gmx', 'jupiter', 'flash'];
-const CEX_EXCHANGES = ['binance', 'bybit', 'okx', 'bitget', 'gateio', 'mexc', 'kucoin', 'kraken'];
+const _CEX_EXCHANGES = ['binance', 'bybit', 'okx', 'bitget', 'gateio', 'mexc', 'kucoin', 'kraken'];
 
 const isDeX = (exchange: string) => DEX_EXCHANGES.includes(exchange.toLowerCase());
 
