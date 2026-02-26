@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+dashboard/node_modules/
+
+# Build outputs
+dist/
+dashboard/dist/
+
+# Development files
+.git/
+.gitignore
+*.md
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Data (mounted as volume)
+data/
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__/
+coverage/
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore

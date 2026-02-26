@@ -1,0 +1,41 @@
+{
+  "name": "prism-ai",
+  "version": "1.0.0",
+  "description": "Cross-exchange AI risk intelligence API for perpetual futures",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "fetch": "tsx src/index.ts",
+    "monitor": "tsx src/cli.ts",
+    "api": "tsx src/api/server.ts",
+    "dashboard": "cd dashboard && npm run dev",
+    "dashboard:build": "cd dashboard && npm run build",
+    "install:all": "npm install && cd dashboard && npm install"
+  },
+  "keywords": [
+    "crypto",
+    "perps",
+    "risk",
+    "api"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.2",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "axios": "^1.13.5",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "ws": "^8.19.0"
+  }
+}

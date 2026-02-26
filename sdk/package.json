@@ -1,0 +1,40 @@
+{
+  "name": "@prism-ai/sdk",
+  "version": "1.0.0",
+  "description": "Official SDK for Prism Risk Intelligence API",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+  },
+  "keywords": [
+    "prism",
+    "crypto",
+    "risk",
+    "trading",
+    "perpetuals",
+    "liquidation"
+  ],
+  "author": "Prism AI",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "peerDependencies": {
+    "typescript": ">=4.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prism-ai/sdk"
+  }
+}
