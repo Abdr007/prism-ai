@@ -1,5 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { exchangeManager, type Exchange } from '../onboarding/index.js';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'exchange-auth' });
 
 // Rate limiting tracking per exchange
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -44,7 +47,7 @@ export function exchangeAuth(options: { optional?: boolean; checkSymbol?: boolea
 
     // Warn if API key is in query params (don't use it)
     if (req.query.api_key) {
-      console.warn(`[SECURITY] API key passed in query params from ${req.ip} - ignoring for security`);
+      log.warn({ ip: req.ip }, 'API key passed in query params — ignored for security');
     }
 
     if (!apiKey) {

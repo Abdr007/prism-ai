@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'pyth-oracle' });
 
 // Pyth Network Hermes API for real-time prices
 const PYTH_API = 'https://hermes.pyth.network';
@@ -53,7 +56,7 @@ export class PythOracle {
 
     const feedId = PRICE_FEED_IDS[symbol];
     if (!feedId) {
-      console.warn(`No Pyth feed ID for ${symbol}`);
+      log.warn({ symbol }, 'No Pyth feed ID');
       return null;
     }
 
@@ -76,7 +79,7 @@ export class PythOracle {
       this.cache.set(symbol, { price, timestamp: Date.now() });
       return price;
     } catch (error) {
-      console.error(`Pyth error for ${symbol}:`, error instanceof Error ? error.message : 'Unknown');
+      log.error({ symbol, err: error instanceof Error ? error.message : 'Unknown' }, 'Pyth price fetch failed');
       return null;
     }
   }
@@ -119,7 +122,7 @@ export class PythOracle {
 
       return prices;
     } catch (error) {
-      console.error('Pyth batch error:', error instanceof Error ? error.message : 'Unknown');
+      log.error({ err: error instanceof Error ? error.message : 'Unknown' }, 'Pyth batch fetch failed');
       return new Map();
     }
   }

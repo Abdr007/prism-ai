@@ -1,19 +1,10 @@
-import axios from 'axios';
-import type { ExchangeClient, OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
+import { BaseExchangeClient } from './base.js';
+import type { OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
 
-// Hyperliquid API
 const BASE_URL = 'https://api.hyperliquid.xyz';
 
-// Hyperliquid uses simple symbols: BTC, ETH
-function toExchangeSymbol(symbol: string): string {
-  return symbol;
-}
-
 interface HyperliquidMeta {
-  universe: Array<{
-    name: string;
-    szDecimals: number;
-  }>;
+  universe: Array<{ name: string; szDecimals: number }>;
 }
 
 interface HyperliquidAssetCtx {
@@ -28,172 +19,132 @@ interface HyperliquidAssetCtx {
   impactPxs: [string, string];
 }
 
-export class HyperliquidClient implements ExchangeClient {
-  name = 'hyperliquid';
+export class HyperliquidClient extends BaseExchangeClient {
+  readonly name = 'hyperliquid';
   private metaCache: HyperliquidMeta | null = null;
+
+  constructor() {
+    super(BASE_URL);
+  }
 
   private async getMeta(): Promise<HyperliquidMeta> {
     if (this.metaCache) return this.metaCache;
-
-    const response = await axios.post(`${BASE_URL}/info`, {
-      type: 'meta'
-    });
-
-    this.metaCache = response.data as HyperliquidMeta;
-    return this.metaCache;
+    const res = await this.request<HyperliquidMeta>('POST', '/info', { data: { type: 'meta' } });
+    this.metaCache = res;
+    return res;
   }
 
-  private async getAssetCtxs(): Promise<HyperliquidAssetCtx[]> {
-    const response = await axios.post(`${BASE_URL}/info`, {
-      type: 'metaAndAssetCtxs'
+  private async getAssetCtxs(): Promise<[HyperliquidMeta, HyperliquidAssetCtx[]]> {
+    const res = await this.request<[HyperliquidMeta, HyperliquidAssetCtx[]]>('POST', '/info', {
+      data: { type: 'metaAndAssetCtxs' },
     });
-
-    return response.data[1] as HyperliquidAssetCtx[];
+    this.metaCache = res[0];
+    return res;
   }
 
-  private async getSymbolIndex(symbol: string): Promise<number> {
-    const meta = await this.getMeta();
-    const index = meta.universe.findIndex(u => u.name === symbol);
-    if (index === -1) {
-      throw new Error(`Symbol ${symbol} not found on Hyperliquid`);
-    }
-    return index;
+  private findIndex(meta: HyperliquidMeta, symbol: string): number {
+    const idx = meta.universe.findIndex((u) => u.name === symbol);
+    if (idx === -1) throw new Error(`Symbol ${symbol} not found on Hyperliquid`);
+    return idx;
   }
 
   async getOpenInterest(symbol: string): Promise<OpenInterest> {
-    const [meta, ctxs] = await Promise.all([
-      this.getMeta(),
-      this.getAssetCtxs()
-    ]);
+    const [meta, ctxs] = await this.getAssetCtxs();
+    const idx = this.findIndex(meta, symbol);
+    const ctx = ctxs[idx];
+    if (!ctx) throw new Error(`No context for ${symbol}`);
 
-    const index = meta.universe.findIndex(u => u.name === symbol);
-    if (index === -1) {
-      throw new Error(`Symbol ${symbol} not found`);
-    }
-
-    const ctx = ctxs[index];
-    if (!ctx) {
-      throw new Error(`No context for ${symbol}`);
-    }
-
-    const oi = parseFloat(ctx.openInterest);
-    const price = parseFloat(ctx.markPx);
+    const oi = this.toNonNegative(ctx.openInterest, 'openInterest');
+    const price = this.toNonNegative(ctx.markPx, 'markPx');
 
     return {
       exchange: this.name,
       symbol,
       openInterest: oi,
       openInterestValue: oi * price,
-      timestamp: Date.now(),
+      timestamp: this.now(),
     };
   }
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
-    const [meta, ctxs] = await Promise.all([
-      this.getMeta(),
-      this.getAssetCtxs()
-    ]);
+    const [meta, ctxs] = await this.getAssetCtxs();
+    const idx = this.findIndex(meta, symbol);
+    const ctx = ctxs[idx];
+    if (!ctx) throw new Error(`No context for ${symbol}`);
 
-    const index = meta.universe.findIndex(u => u.name === symbol);
-    if (index === -1) {
-      throw new Error(`Symbol ${symbol} not found`);
-    }
-
-    const ctx = ctxs[index];
-    if (!ctx) {
-      throw new Error(`No context for ${symbol}`);
-    }
-
-    // Hyperliquid funding is hourly, convert to 8h equivalent for comparison
-    const hourlyFunding = parseFloat(ctx.funding);
+    // Hyperliquid funding is hourly — convert to 8h equivalent
+    const hourlyFunding = this.toFiniteNumber(ctx.funding, 'funding');
 
     return {
       exchange: this.name,
       symbol,
-      fundingRate: hourlyFunding * 8, // Convert to 8h rate
-      fundingTime: Date.now() + 3600000, // Next hour
-      timestamp: Date.now(),
+      fundingRate: hourlyFunding * 8,
+      fundingTime: this.now() + 3_600_000,
+      timestamp: this.now(),
     };
   }
 
   async getMarkPrice(symbol: string): Promise<MarkPrice> {
-    const [meta, ctxs] = await Promise.all([
-      this.getMeta(),
-      this.getAssetCtxs()
-    ]);
+    const [meta, ctxs] = await this.getAssetCtxs();
+    const idx = this.findIndex(meta, symbol);
+    const ctx = ctxs[idx];
+    if (!ctx) throw new Error(`No context for ${symbol}`);
 
-    const index = meta.universe.findIndex(u => u.name === symbol);
-    if (index === -1) {
-      throw new Error(`Symbol ${symbol} not found`);
-    }
+    const markPrice = this.toNonNegative(ctx.markPx, 'markPx');
+    const indexPrice = this.toNonNegative(ctx.oraclePx, 'oraclePx');
 
-    const ctx = ctxs[index];
-    if (!ctx) {
-      throw new Error(`No context for ${symbol}`);
-    }
+    this.assertPriceDeviation(markPrice, indexPrice, symbol);
 
     return {
       exchange: this.name,
       symbol,
-      markPrice: parseFloat(ctx.markPx),
-      indexPrice: parseFloat(ctx.oraclePx),
-      timestamp: Date.now(),
+      markPrice,
+      indexPrice,
+      timestamp: this.now(),
     };
   }
 
+  /** Batch: single API call for all symbols. */
   async getAllData(symbols: string[]): Promise<ExchangeData> {
-    const [meta, ctxs] = await Promise.all([
-      this.getMeta(),
-      this.getAssetCtxs()
-    ]);
+    const [meta, ctxs] = await this.getAssetCtxs();
 
     const openInterest: OpenInterest[] = [];
     const fundingRates: FundingRate[] = [];
     const markPrices: MarkPrice[] = [];
 
     for (const symbol of symbols) {
-      const index = meta.universe.findIndex(u => u.name === symbol);
-      if (index === -1) continue;
-
-      const ctx = ctxs[index];
+      const idx = meta.universe.findIndex((u) => u.name === symbol);
+      if (idx === -1) continue;
+      const ctx = ctxs[idx];
       if (!ctx) continue;
 
-      const oi = parseFloat(ctx.openInterest);
-      const markPrice = parseFloat(ctx.markPx);
-      const oraclePrice = parseFloat(ctx.oraclePx);
-      const hourlyFunding = parseFloat(ctx.funding);
+      try {
+        const oi = this.toNonNegative(ctx.openInterest, 'openInterest');
+        const mark = this.toNonNegative(ctx.markPx, 'markPx');
+        const oracle = this.toNonNegative(ctx.oraclePx, 'oraclePx');
+        const hourlyFunding = this.toFiniteNumber(ctx.funding, 'funding');
 
-      openInterest.push({
-        exchange: this.name,
-        symbol,
-        openInterest: oi,
-        openInterestValue: oi * markPrice,
-        timestamp: Date.now(),
-      });
+        this.assertPriceDeviation(mark, oracle, symbol);
 
-      fundingRates.push({
-        exchange: this.name,
-        symbol,
-        fundingRate: hourlyFunding * 8, // Convert to 8h
-        fundingTime: Date.now() + 3600000,
-        timestamp: Date.now(),
-      });
+        const ts = this.now();
 
-      markPrices.push({
-        exchange: this.name,
-        symbol,
-        markPrice,
-        indexPrice: oraclePrice,
-        timestamp: Date.now(),
-      });
+        openInterest.push({
+          exchange: this.name, symbol,
+          openInterest: oi, openInterestValue: oi * mark, timestamp: ts,
+        });
+        fundingRates.push({
+          exchange: this.name, symbol,
+          fundingRate: hourlyFunding * 8, fundingTime: ts + 3_600_000, timestamp: ts,
+        });
+        markPrices.push({
+          exchange: this.name, symbol,
+          markPrice: mark, indexPrice: oracle, timestamp: ts,
+        });
+      } catch {
+        this.logger.warn({ symbol }, 'Skipping symbol due to validation failure');
+      }
     }
 
-    return {
-      exchange: this.name,
-      openInterest,
-      fundingRates,
-      markPrices,
-      timestamp: Date.now(),
-    };
+    return { exchange: this.name, openInterest, fundingRates, markPrices, timestamp: this.now() };
   }
 }

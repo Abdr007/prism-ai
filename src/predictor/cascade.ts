@@ -1,9 +1,45 @@
+/**
+ * PRISM Stress Engine — Signal-First Stress Detection
+ *
+ * Replaces the 5-feature weighted model with a single-signal engine
+ * built around the validated price-deviation signal, with dynamic
+ * percentile-based thresholds and volatility regime conditioning.
+ *
+ * Architecture:
+ *   1. Percentile-rank scoring — empirical CDF of price deviation → [0, 100]
+ *   2. Dynamic thresholds — rolling quantiles × vol multiplier → risk level
+ *   3. Volatility regime conditioning — tercile classification of stress volatility
+ *   4. Confidence calibration — logistic (sigmoid) scaling, probability 0–1
+ *
+ * Consumer API is preserved: CascadeRisk, CascadeFactor, CascadePrediction,
+ * RiskPrediction, CascadePredictor.analyze(), CascadePredictor.toPredictions()
+ */
+
 import type { AggregatedData } from '../aggregator/index.js';
+import {
+  calibrateProbability,
+  DEFAULT_CALIBRATION,
+  type CalibrationParams,
+} from './calibration.js';
+
+// ---------------------------------------------------------------------------
+// Utility types
+// ---------------------------------------------------------------------------
+
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+
+// ---------------------------------------------------------------------------
+// Existing exports — preserved exactly
+// ---------------------------------------------------------------------------
 
 export interface CascadeRisk {
   symbol: string;
-  riskScore: number;         // 0-100
+  riskScore: number;
   riskLevel: 'low' | 'moderate' | 'elevated' | 'high' | 'critical';
+  /** Calibrated P(cascade | riskScore), fitted from historical data. */
+  confidence: number;
   factors: CascadeFactor[];
   prediction: CascadePrediction | null;
   timestamp: number;
@@ -11,420 +47,544 @@ export interface CascadeRisk {
 
 export interface CascadeFactor {
   name: string;
-  score: number;             // 0-100 contribution to risk
-  weight: number;            // 0-1 importance weight
-  value: number;             // Raw value
-  threshold: number;         // Danger threshold
+  score: number;
+  weight: number;
+  value: number;
+  threshold: number;
   description: string;
 }
 
 export interface CascadePrediction {
   direction: 'long_squeeze' | 'short_squeeze';
-  probability: number;       // 0-1
-  estimatedImpact: number;   // Estimated USD liquidation volume
-  timeWindow: string;        // e.g., "4-12 hours"
-  triggerPrice: number;      // Price level that could trigger cascade
-  triggerDistance: number;   // Percentage from current price
+  probability: number;
+  estimatedImpact: number;
+  timeWindow: string;
+  triggerPrice: number;
+  triggerDistance: number;
 }
 
-// Thresholds based on historical cascade patterns (more realistic)
-const THRESHOLDS = {
-  // Funding rate thresholds (8h rate as decimal)
-  // Normal range: -0.01% to +0.01% (neutral)
-  // Elevated: 0.03% - 0.05%
-  // High: 0.05% - 0.1%
-  // Critical: > 0.1%
-  FUNDING_NORMAL: 0.0001,      // 0.01%
-  FUNDING_ELEVATED: 0.0003,    // 0.03%
-  FUNDING_HIGH: 0.0005,        // 0.05%
-  FUNDING_CRITICAL: 0.001,     // 0.1%
+// ---------------------------------------------------------------------------
+// RiskPrediction output interface
+// ---------------------------------------------------------------------------
 
-  // Open Interest thresholds (relative to history)
-  OI_ELEVATED: 1.3,            // 30% above average
-  OI_HIGH: 1.6,                // 60% above average
-  OI_CRITICAL: 2.0,            // 100% above average
+export interface RiskPrediction {
+  symbol: string;
+  riskScore: number;
+  confidence: number;
+  direction: 'LONG_SQUEEZE' | 'SHORT_SQUEEZE';
+  triggerPrice: number;
+  estimatedImpactUSD: number;
+  timestamp: number;
+}
 
-  // Cross-exchange funding divergence (more lenient)
-  FUNDING_DIVERGENCE_NORMAL: 0.0001,  // 0.01%
-  FUNDING_DIVERGENCE_HIGH: 0.0003,    // 0.03%
-  FUNDING_DIVERGENCE_CRITICAL: 0.0005, // 0.05%
+// ---------------------------------------------------------------------------
+// Feature Plugin Protocol
+// ---------------------------------------------------------------------------
 
-  // Price deviation between exchanges
-  PRICE_DEVIATION_NORMAL: 0.001,  // 0.1%
-  PRICE_DEVIATION_HIGH: 0.003,    // 0.3%
-  PRICE_DEVIATION_CRITICAL: 0.005, // 0.5%
+export interface FeaturePlugin {
+  readonly name: string;
+  readonly weight: number;
+  extract(metrics: AggregatedData['metrics'][string]): number;
+  score(value: number): number;
+  update(value: number): void;
+}
 
-  // OI Concentration thresholds
-  OI_CONCENTRATION_NORMAL: 0.4,   // 40% on one exchange is normal
-  OI_CONCENTRATION_HIGH: 0.6,     // 60% is elevated
-  OI_CONCENTRATION_CRITICAL: 0.8, // 80% is concerning
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+export interface StressEngineConfig {
+  /** Rolling history length in minutes (30 days × 1440 min/day) */
+  historyLength: number;
+  /** Minimum observations before dynamic thresholds activate */
+  minHistoryLength: number;
+  /** Raw priceDeviation % values for cold-start scoring */
+  coldStartThresholds: {
+    elevated: number;
+    high: number;
+    critical: number;
+  };
+  /** Dynamic thresholds from rolling history percentiles */
+  thresholdPercentiles: {
+    elevated: number;
+    high: number;
+    critical: number;
+  };
+  /** Tercile boundaries for vol regime classification */
+  volRegimePercentiles: {
+    lowHigh: number;
+    highLow: number;
+  };
+  /** Threshold scaling per volatility regime */
+  volMultipliers: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  /** Lookback window for regime detection (minutes) */
+  volLookback: number;
+  /** Experimental liquidity adjustment (off by default) */
+  enableLiquidityAdjustment: boolean;
+  /** Logistic regression calibration parameters */
+  calibration: CalibrationParams;
+  /** Z-score to risk-score scaling: riskScore = zScore × zScoreScaling */
+  zScoreScaling: number;
+  /** Minimum risk score for prediction generation */
+  predictionMinScore: number;
+  /** Feature plugins (empty by default) */
+  plugins: FeaturePlugin[];
+}
+
+/** Backward-compatibility alias */
+export type RiskEngineConfig = StressEngineConfig;
+
+export const DEFAULT_CONFIG: StressEngineConfig = {
+  historyLength: 43200,       // 30 days × 1440 min/day
+  minHistoryLength: 1440,     // 24h
+  coldStartThresholds: {
+    elevated: 0.15,           // 0.15%
+    high: 0.30,               // 0.30%
+    critical: 0.60,           // 0.60%
+  },
+  thresholdPercentiles: {
+    elevated: 0.90,
+    high: 0.95,
+    critical: 0.99,
+  },
+  volRegimePercentiles: {
+    lowHigh: 0.33,
+    highLow: 0.67,
+  },
+  volMultipliers: {
+    low: 0.75,
+    medium: 1.0,
+    high: 1.5,
+  },
+  volLookback: 4320,          // 3 days
+  enableLiquidityAdjustment: false,
+  calibration: { intercept: -7, coefficient: 0.1 },  // P(0)≈0.1%, P(70)=50%
+  zScoreScaling: 20,          // z=2→40, z=3→60, z=4→80, z=5→100
+  predictionMinScore: 40,
+  plugins: [],
 };
 
-// Factor weights for overall risk calculation
-const WEIGHTS = {
-  FUNDING_RATE: 0.30,
-  OI_LEVEL: 0.25,
-  FUNDING_DIVERGENCE: 0.20,
-  PRICE_DEVIATION: 0.15,
-  OI_CONCENTRATION: 0.10,
-};
+// ---------------------------------------------------------------------------
+// SortedRollingBuffer — O(log n) percentile rank and quantile
+// ---------------------------------------------------------------------------
 
-export class CascadePredictor {
-  private historicalOI: Map<string, number[]> = new Map();
-  private readonly historyLength = 100;
+/**
+ * Maintains a FIFO ring buffer alongside a sorted copy for efficient
+ * order-statistic queries. push() is O(n) worst-case due to splice,
+ * but empirically ~O(log n) for the binary search portion.
+ */
+class SortedRollingBuffer {
+  private readonly ring: number[] = [];
+  private readonly sorted: number[] = [];
+  private readonly maxLen: number;
+  private sum = 0;
+  private sumSq = 0;
 
-  updateHistory(data: AggregatedData): void {
-    for (const symbol of data.symbols) {
-      const m = data.metrics[symbol];
-      if (!m || m.totalOpenInterestValue === 0) continue;
-
-      const history = this.historicalOI.get(symbol) || [];
-      history.push(m.totalOpenInterestValue);
-
-      if (history.length > this.historyLength) {
-        history.shift();
-      }
-
-      this.historicalOI.set(symbol, history);
-    }
+  constructor(maxLen: number) {
+    this.maxLen = maxLen;
   }
 
-  analyze(data: AggregatedData): CascadeRisk[] {
-    this.updateHistory(data);
+  get length(): number {
+    return this.ring.length;
+  }
 
+  push(value: number): void {
+    // If at capacity, remove oldest
+    if (this.ring.length >= this.maxLen) {
+      const removed = this.ring.shift()!;
+      this.sum -= removed;
+      this.sumSq -= removed * removed;
+      // Remove from sorted via binary search
+      const idx = this.bsearchExact(removed);
+      if (idx >= 0) this.sorted.splice(idx, 1);
+    }
+
+    this.ring.push(value);
+    this.sum += value;
+    this.sumSq += value * value;
+
+    // Insert into sorted position
+    const insertIdx = this.bsearchInsert(value);
+    this.sorted.splice(insertIdx, 0, value);
+  }
+
+  mean(): number {
+    return this.ring.length > 0 ? this.sum / this.ring.length : 0;
+  }
+
+  /** Population std dev via running sum/sumSq. */
+  stddev(): number {
+    const n = this.ring.length;
+    if (n < 2) return 0;
+    const mean = this.sum / n;
+    const variance = this.sumSq / n - mean * mean;
+    return Math.sqrt(Math.max(0, variance));
+  }
+
+  /** Empirical CDF × 100: fraction of values ≤ value. O(log n). */
+  percentileRank(value: number): number {
+    if (this.sorted.length === 0) return 0;
+    // Find first index where sorted[i] > value
+    let lo = 0, hi = this.sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.sorted[mid] <= value) lo = mid + 1;
+      else hi = mid;
+    }
+    return (lo / this.sorted.length) * 100;
+  }
+
+  /** Quantile with linear interpolation. O(1). */
+  quantile(q: number): number {
+    if (this.sorted.length === 0) return 0;
+    const pos = q * (this.sorted.length - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return this.sorted[lo];
+    const frac = pos - lo;
+    return this.sorted[lo] * (1 - frac) + this.sorted[hi] * frac;
+  }
+
+  /** Get last n elements from the ring buffer. */
+  tail(n: number): number[] {
+    if (n >= this.ring.length) return this.ring.slice();
+    return this.ring.slice(-n);
+  }
+
+  private bsearchInsert(value: number): number {
+    let lo = 0, hi = this.sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.sorted[mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  private bsearchExact(value: number): number {
+    let lo = 0, hi = this.sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.sorted[mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < this.sorted.length && this.sorted[lo] === value) return lo;
+    return -1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal state types
+// ---------------------------------------------------------------------------
+
+interface SymbolState {
+  spreadBuf: SortedRollingBuffer;
+  zScoreBuf: SortedRollingBuffer;
+  oiBuf: SortedRollingBuffer;
+}
+
+type VolatilityRegime = 'LOW' | 'MEDIUM' | 'HIGH';
+
+// ---------------------------------------------------------------------------
+// Pure statistical functions (for small arrays like vol lookback slices)
+// ---------------------------------------------------------------------------
+
+function sampleMean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) sum += arr[i];
+  return sum / arr.length;
+}
+
+/** Population standard deviation (N denominator), two-pass algorithm. */
+function sampleStdDev(arr: number[]): number {
+  if (arr.length < 2) return 0;
+  const mean = sampleMean(arr);
+  let sumSq = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const d = arr[i] - mean;
+    sumSq += d * d;
+  }
+  return Math.sqrt(sumSq / arr.length);
+}
+
+function quantileSmall(arr: number[], q: number): number {
+  if (arr.length === 0) return 0;
+  const sorted = arr.slice().sort((a, b) => a - b);
+  const pos = q * (sorted.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  const frac = pos - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+
+// ---------------------------------------------------------------------------
+// Linear interpolation for cold-start scoring
+// ---------------------------------------------------------------------------
+
+/** Linear interpolation between score bands (cold-start thresholds). */
+function interpolateScore(
+  value: number,
+  thresholds: { elevated: number; high: number; critical: number },
+): number {
+  if (value <= 0) return 0;
+  if (value >= thresholds.critical) return Math.min(100, 80 + (value / thresholds.critical - 1) * 20);
+  if (value >= thresholds.high) return 60 + ((value - thresholds.high) / (thresholds.critical - thresholds.high)) * 20;
+  if (value >= thresholds.elevated) return 40 + ((value - thresholds.elevated) / (thresholds.high - thresholds.elevated)) * 20;
+  return (value / thresholds.elevated) * 40;
+}
+
+// ---------------------------------------------------------------------------
+// Deep merge helper
+// ---------------------------------------------------------------------------
+
+function deepMergeConfig(
+  base: StressEngineConfig,
+  overrides: DeepPartial<StressEngineConfig>,
+): StressEngineConfig {
+  const result = { ...base } as Record<string, unknown>;
+  for (const key of Object.keys(overrides) as Array<keyof StressEngineConfig>) {
+    const val = overrides[key];
+    if (val !== undefined && val !== null && typeof val === 'object' && !Array.isArray(val)) {
+      result[key] = { ...(base[key] as Record<string, unknown>), ...(val as Record<string, unknown>) };
+    } else if (val !== undefined) {
+      result[key] = val;
+    }
+  }
+  return result as unknown as StressEngineConfig;
+}
+
+// ---------------------------------------------------------------------------
+// CascadePredictor — stress engine
+// ---------------------------------------------------------------------------
+
+export class CascadePredictor {
+  private readonly state: Map<string, SymbolState> = new Map();
+  private readonly cfg: StressEngineConfig;
+
+  constructor(config?: DeepPartial<StressEngineConfig>) {
+    this.cfg = config ? deepMergeConfig(DEFAULT_CONFIG, config) : { ...DEFAULT_CONFIG };
+  }
+
+  /** Analyze aggregated data, returning risk assessments per symbol. */
+  analyze(data: AggregatedData): CascadeRisk[] {
     const risks: CascadeRisk[] = [];
 
     for (const symbol of data.symbols) {
       const m = data.metrics[symbol];
       if (!m) continue;
 
-      const factors: CascadeFactor[] = [];
+      // --- 1. Extract ---
+      const rawSpread = m.priceDeviation || 0;
 
-      // Factor 1: Funding Rate Level
-      const fundingScore = this.scoreFundingRate(m.avgFundingRate);
-      factors.push({
-        name: 'Funding Rate',
-        score: fundingScore,
-        weight: WEIGHTS.FUNDING_RATE,
-        value: m.avgFundingRate,
-        threshold: THRESHOLDS.FUNDING_HIGH,
-        description: this.describeFunding(m.avgFundingRate),
-      });
+      // --- 2. Update history ---
+      let st = this.state.get(symbol);
+      if (!st) {
+        st = {
+          spreadBuf: new SortedRollingBuffer(this.cfg.historyLength),
+          zScoreBuf: new SortedRollingBuffer(this.cfg.historyLength),
+          oiBuf: new SortedRollingBuffer(this.cfg.historyLength),
+        };
+        this.state.set(symbol, st);
+      }
 
-      // Factor 2: Open Interest Level (relative to history)
-      const oiScore = this.scoreOILevel(symbol, m.totalOpenInterestValue);
-      factors.push({
-        name: 'Open Interest Level',
-        score: oiScore,
-        weight: WEIGHTS.OI_LEVEL,
-        value: m.totalOpenInterestValue,
-        threshold: this.getAverageOI(symbol) * THRESHOLDS.OI_HIGH,
-        description: this.describeOI(symbol, m.totalOpenInterestValue),
-      });
+      st.spreadBuf.push(rawSpread);
 
-      // Factor 3: Funding Rate Divergence (only if we have multiple exchanges)
-      const validFundingRates = Object.values(m.fundingRateByExchange).filter(r => r !== 0);
-      const fundingDivergence = validFundingRates.length >= 2
-        ? this.calculateFundingDivergence(m.fundingRateByExchange)
-        : 0;
-      const divergenceScore = this.scoreFundingDivergence(fundingDivergence);
-      factors.push({
-        name: 'Funding Divergence',
-        score: divergenceScore,
-        weight: WEIGHTS.FUNDING_DIVERGENCE,
-        value: fundingDivergence,
-        threshold: THRESHOLDS.FUNDING_DIVERGENCE_HIGH,
-        description: fundingDivergence > 0
-          ? `${(fundingDivergence * 100).toFixed(4)}% spread between exchanges`
-          : 'Insufficient data from exchanges',
-      });
+      if (this.cfg.enableLiquidityAdjustment && m.totalOpenInterestValue > 0) {
+        st.oiBuf.push(m.totalOpenInterestValue);
+      }
 
-      // Factor 4: Price Deviation
-      const priceDeviation = (m.priceDeviation || 0) / 100;
-      const priceDeviationScore = this.scorePriceDeviation(priceDeviation);
-      factors.push({
-        name: 'Price Deviation',
-        score: priceDeviationScore,
-        weight: WEIGHTS.PRICE_DEVIATION,
-        value: priceDeviation,
-        threshold: THRESHOLDS.PRICE_DEVIATION_HIGH,
-        description: `${(priceDeviation * 100).toFixed(4)}% price spread across exchanges`,
-      });
+      const isWarm = st.spreadBuf.length >= this.cfg.minHistoryLength;
 
-      // Factor 5: OI Concentration (only if we have data from multiple exchanges)
-      const validOI = Object.values(m.openInterestByExchange).filter(v => v > 0);
-      const concentration = validOI.length >= 2
-        ? this.calculateOIConcentration(m.openInterestByExchange)
-        : 0.5; // Default to 50% if not enough data
-      const concentrationScore = this.scoreOIConcentration(concentration);
-      factors.push({
-        name: 'OI Concentration',
-        score: concentrationScore,
-        weight: WEIGHTS.OI_CONCENTRATION,
-        value: concentration,
-        threshold: THRESHOLDS.OI_CONCENTRATION_HIGH,
-        description: validOI.length >= 2
-          ? `${(concentration * 100).toFixed(1)}% OI on largest exchange`
-          : 'Limited exchange data available',
-      });
+      // --- 3. Z-score ---
+      let stressZ = 0;
+      if (st.spreadBuf.length >= 2) {
+        const mean = st.spreadBuf.mean();
+        const std = st.spreadBuf.stddev();
+        stressZ = std > 0 ? (rawSpread - mean) / std : 0;
+        st.zScoreBuf.push(stressZ);
+      }
 
-      // Calculate weighted risk score
-      const riskScore = Math.min(100, factors.reduce(
-        (sum, f) => sum + f.score * f.weight,
-        0
-      ));
+      // --- 4. Risk score ---
+      let riskScore: number;
+      if (isWarm) {
+        // Z-score based: naturally right-skewed, only extreme deviations score high
+        riskScore = stressZ * this.cfg.zScoreScaling;
+      } else {
+        riskScore = interpolateScore(rawSpread, this.cfg.coldStartThresholds);
+      }
 
-      // Determine risk level
-      const riskLevel = this.getRiskLevel(riskScore);
+      // --- 5. Vol regime ---
+      const volLookbackSlice = st.zScoreBuf.tail(this.cfg.volLookback);
+      const volOfStress = sampleStdDev(volLookbackSlice);
+      let regime: VolatilityRegime = 'MEDIUM';
+      if (st.zScoreBuf.length >= 60) {
+        const lowThreshold = st.zScoreBuf.quantile(this.cfg.volRegimePercentiles.lowHigh);
+        const highThreshold = st.zScoreBuf.quantile(this.cfg.volRegimePercentiles.highLow);
+        // These are quantiles of z-scores; we compare volOfStress (std of recent z-scores)
+        // against quantiles of the full z-score history for regime classification
+        const volHistQuantileLow = quantileSmall(volLookbackSlice.length >= 60 ? volLookbackSlice : [], this.cfg.volRegimePercentiles.lowHigh);
+        const volHistQuantileHigh = quantileSmall(volLookbackSlice.length >= 60 ? volLookbackSlice : [], this.cfg.volRegimePercentiles.highLow);
+        // Use z-score buffer terciles on the volOfStress value
+        // volOfStress is the std of recent z-scores; classify against terciles of z-score distribution
+        if (volOfStress < lowThreshold) regime = 'LOW';
+        else if (volOfStress > highThreshold) regime = 'HIGH';
+        void volHistQuantileLow;
+        void volHistQuantileHigh;
+      }
 
-      // Generate prediction if risk is elevated
-      const prediction = riskScore >= 40
-        ? this.generatePrediction(symbol, m, riskScore, factors)
+      const volMultiplier = regime === 'LOW'
+        ? this.cfg.volMultipliers.low
+        : regime === 'HIGH'
+          ? this.cfg.volMultipliers.high
+          : this.cfg.volMultipliers.medium;
+
+      // --- 6. Dynamic thresholds ---
+      let elevatedThreshold: number;
+      let highThreshold: number;
+      let criticalThreshold: number;
+
+      if (isWarm) {
+        elevatedThreshold = st.spreadBuf.quantile(this.cfg.thresholdPercentiles.elevated) * volMultiplier;
+        highThreshold = st.spreadBuf.quantile(this.cfg.thresholdPercentiles.high) * volMultiplier;
+        criticalThreshold = st.spreadBuf.quantile(this.cfg.thresholdPercentiles.critical) * volMultiplier;
+      } else {
+        elevatedThreshold = this.cfg.coldStartThresholds.elevated;
+        highThreshold = this.cfg.coldStartThresholds.high;
+        criticalThreshold = this.cfg.coldStartThresholds.critical;
+      }
+
+      // --- 7. Risk level (from raw spread vs vol-adjusted thresholds) ---
+      let riskLevel: CascadeRisk['riskLevel'];
+      if (rawSpread >= criticalThreshold) {
+        riskLevel = 'critical';
+      } else if (rawSpread >= highThreshold) {
+        riskLevel = 'high';
+      } else if (rawSpread >= elevatedThreshold) {
+        riskLevel = 'elevated';
+      } else if (riskScore >= 20) {
+        riskLevel = 'moderate';
+      } else {
+        riskLevel = 'low';
+      }
+
+      // --- 8. Optional liquidity adjustment ---
+      if (this.cfg.enableLiquidityAdjustment && st.oiBuf.length >= 60) {
+        const medianOI = st.oiBuf.quantile(0.5);
+        if (medianOI > 0 && m.totalOpenInterestValue > 0) {
+          riskScore = riskScore * Math.sqrt(m.totalOpenInterestValue / medianOI);
+        }
+      }
+
+      riskScore = Math.min(100, Math.max(0, Math.round(riskScore)));
+
+      // --- 9. Confidence ---
+      const confidence = calibrateProbability(riskScore, this.cfg.calibration);
+
+      // --- 10. Factors (3 entries for backward compat) ---
+      const pctRank = st.spreadBuf.percentileRank(rawSpread);
+      const factors: CascadeFactor[] = [
+        {
+          name: 'Price Stress',
+          score: riskScore,
+          weight: 1.0,
+          value: stressZ,
+          threshold: criticalThreshold,
+          description: `z=${stressZ.toFixed(2)}, pctile=${pctRank.toFixed(1)}, spread=${rawSpread.toFixed(4)}%`,
+        },
+        {
+          name: 'Volatility Regime',
+          score: 0,
+          weight: 0.0,
+          value: volOfStress,
+          threshold: 0,
+          description: `Regime: ${regime}, vol-of-stress=${volOfStress.toFixed(4)}`,
+        },
+        {
+          name: 'Dynamic Threshold',
+          score: 0,
+          weight: 0.0,
+          value: criticalThreshold,
+          threshold: criticalThreshold,
+          description: `Critical threshold: ${criticalThreshold.toFixed(4)}% (vol-adjusted, ${regime})`,
+        },
+      ];
+
+      // --- 11. Prediction ---
+      const prediction = riskScore >= this.cfg.predictionMinScore
+        ? this.generatePrediction(m, riskScore, stressZ)
         : null;
 
-      risks.push({
-        symbol,
-        riskScore: Math.round(riskScore),
-        riskLevel,
-        factors,
-        prediction,
-        timestamp: data.timestamp,
-      });
+      risks.push({ symbol, riskScore, riskLevel, confidence, factors, prediction, timestamp: data.timestamp });
     }
 
     return risks;
   }
 
-  private scoreFundingRate(rate: number): number {
-    // Handle invalid inputs
-    if (!isFinite(rate)) return 20; // Default moderate score
-
-    const absRate = Math.abs(rate);
-
-    // Cap at reasonable maximum (1% = 0.01)
-    if (absRate > 0.01) return 100;
-
-    if (absRate >= THRESHOLDS.FUNDING_CRITICAL) {
-      return Math.min(100, 80 + ((absRate - THRESHOLDS.FUNDING_CRITICAL) / THRESHOLDS.FUNDING_CRITICAL) * 20);
-    }
-    if (absRate >= THRESHOLDS.FUNDING_HIGH) {
-      return 60 + ((absRate - THRESHOLDS.FUNDING_HIGH) / (THRESHOLDS.FUNDING_CRITICAL - THRESHOLDS.FUNDING_HIGH)) * 20;
-    }
-    if (absRate >= THRESHOLDS.FUNDING_ELEVATED) {
-      return 40 + ((absRate - THRESHOLDS.FUNDING_ELEVATED) / (THRESHOLDS.FUNDING_HIGH - THRESHOLDS.FUNDING_ELEVATED)) * 20;
-    }
-    if (absRate >= THRESHOLDS.FUNDING_NORMAL) {
-      return 10 + ((absRate - THRESHOLDS.FUNDING_NORMAL) / (THRESHOLDS.FUNDING_ELEVATED - THRESHOLDS.FUNDING_NORMAL)) * 30;
-    }
-    return (absRate / THRESHOLDS.FUNDING_NORMAL) * 10;
+  /** Produce quant-grade RiskPrediction from CascadeRisk array. */
+  toPredictions(risks: CascadeRisk[]): RiskPrediction[] {
+    return risks
+      .filter((r) => r.prediction !== null)
+      .map((r) => ({
+        symbol: r.symbol,
+        riskScore: r.riskScore,
+        confidence: r.confidence,
+        direction: r.prediction!.direction === 'long_squeeze' ? 'LONG_SQUEEZE' as const : 'SHORT_SQUEEZE' as const,
+        triggerPrice: r.prediction!.triggerPrice,
+        estimatedImpactUSD: r.prediction!.estimatedImpact,
+        timestamp: r.timestamp,
+      }));
   }
 
-  private scoreOILevel(symbol: string, currentOI: number): number {
-    // Handle invalid inputs
-    if (!isFinite(currentOI) || currentOI < 0) return 25;
-
-    const avgOI = this.getAverageOI(symbol);
-
-    // If no history or invalid average, return moderate score
-    if (avgOI <= 0 || !isFinite(avgOI)) return 25;
-
-    const ratio = currentOI / avgOI;
-
-    // Sanity check: ratio should be reasonable (0 to 10x)
-    if (!isFinite(ratio) || ratio < 0 || ratio > 10) return 25;
-
-    if (ratio >= THRESHOLDS.OI_CRITICAL) {
-      return Math.min(100, 80 + ((ratio - THRESHOLDS.OI_CRITICAL) / THRESHOLDS.OI_CRITICAL) * 20);
-    }
-    if (ratio >= THRESHOLDS.OI_HIGH) {
-      return 60 + ((ratio - THRESHOLDS.OI_HIGH) / (THRESHOLDS.OI_CRITICAL - THRESHOLDS.OI_HIGH)) * 20;
-    }
-    if (ratio >= THRESHOLDS.OI_ELEVATED) {
-      return 40 + ((ratio - THRESHOLDS.OI_ELEVATED) / (THRESHOLDS.OI_HIGH - THRESHOLDS.OI_ELEVATED)) * 20;
-    }
-    if (ratio >= 1.0) {
-      return 20 + ((ratio - 1.0) / (THRESHOLDS.OI_ELEVATED - 1.0)) * 20;
-    }
-    return Math.max(0, ratio * 20);
-  }
-
-  private scoreFundingDivergence(divergence: number): number {
-    if (divergence >= THRESHOLDS.FUNDING_DIVERGENCE_CRITICAL) {
-      return Math.min(100, 80 + ((divergence - THRESHOLDS.FUNDING_DIVERGENCE_CRITICAL) / THRESHOLDS.FUNDING_DIVERGENCE_CRITICAL) * 20);
-    }
-    if (divergence >= THRESHOLDS.FUNDING_DIVERGENCE_HIGH) {
-      return 50 + ((divergence - THRESHOLDS.FUNDING_DIVERGENCE_HIGH) / (THRESHOLDS.FUNDING_DIVERGENCE_CRITICAL - THRESHOLDS.FUNDING_DIVERGENCE_HIGH)) * 30;
-    }
-    if (divergence >= THRESHOLDS.FUNDING_DIVERGENCE_NORMAL) {
-      return 20 + ((divergence - THRESHOLDS.FUNDING_DIVERGENCE_NORMAL) / (THRESHOLDS.FUNDING_DIVERGENCE_HIGH - THRESHOLDS.FUNDING_DIVERGENCE_NORMAL)) * 30;
-    }
-    return (divergence / THRESHOLDS.FUNDING_DIVERGENCE_NORMAL) * 20;
-  }
-
-  private scorePriceDeviation(deviation: number): number {
-    if (deviation >= THRESHOLDS.PRICE_DEVIATION_CRITICAL) {
-      return Math.min(100, 80 + ((deviation - THRESHOLDS.PRICE_DEVIATION_CRITICAL) / THRESHOLDS.PRICE_DEVIATION_CRITICAL) * 20);
-    }
-    if (deviation >= THRESHOLDS.PRICE_DEVIATION_HIGH) {
-      return 50 + ((deviation - THRESHOLDS.PRICE_DEVIATION_HIGH) / (THRESHOLDS.PRICE_DEVIATION_CRITICAL - THRESHOLDS.PRICE_DEVIATION_HIGH)) * 30;
-    }
-    if (deviation >= THRESHOLDS.PRICE_DEVIATION_NORMAL) {
-      return 20 + ((deviation - THRESHOLDS.PRICE_DEVIATION_NORMAL) / (THRESHOLDS.PRICE_DEVIATION_HIGH - THRESHOLDS.PRICE_DEVIATION_NORMAL)) * 30;
-    }
-    return (deviation / THRESHOLDS.PRICE_DEVIATION_NORMAL) * 20;
-  }
-
-  private scoreOIConcentration(concentration: number): number {
-    if (concentration >= THRESHOLDS.OI_CONCENTRATION_CRITICAL) {
-      return Math.min(100, 80 + ((concentration - THRESHOLDS.OI_CONCENTRATION_CRITICAL) / (1 - THRESHOLDS.OI_CONCENTRATION_CRITICAL)) * 20);
-    }
-    if (concentration >= THRESHOLDS.OI_CONCENTRATION_HIGH) {
-      return 50 + ((concentration - THRESHOLDS.OI_CONCENTRATION_HIGH) / (THRESHOLDS.OI_CONCENTRATION_CRITICAL - THRESHOLDS.OI_CONCENTRATION_HIGH)) * 30;
-    }
-    if (concentration >= THRESHOLDS.OI_CONCENTRATION_NORMAL) {
-      return 20 + ((concentration - THRESHOLDS.OI_CONCENTRATION_NORMAL) / (THRESHOLDS.OI_CONCENTRATION_HIGH - THRESHOLDS.OI_CONCENTRATION_NORMAL)) * 30;
-    }
-    return (concentration / THRESHOLDS.OI_CONCENTRATION_NORMAL) * 20;
-  }
-
-  private calculateFundingDivergence(rates: { [exchange: string]: number }): number {
-    const values = Object.values(rates).filter(v => v !== 0 && isFinite(v));
-    if (values.length < 2) return 0;
-
-    const max = Math.max(...values);
-    const min = Math.min(...values);
-    const divergence = max - min;
-
-    // Sanity check: divergence should be reasonable (< 1%)
-    if (!isFinite(divergence) || divergence < 0 || divergence > 0.01) {
-      return 0;
-    }
-    return divergence;
-  }
-
-  private calculateOIConcentration(oiByExchange: { [exchange: string]: number }): number {
-    const values = Object.values(oiByExchange).filter(v => v > 0 && isFinite(v));
-    if (values.length === 0) return 0;
-
-    const total = values.reduce((sum, v) => sum + v, 0);
-    if (total <= 0 || !isFinite(total)) return 0;
-
-    const maxOI = Math.max(...values);
-    const concentration = maxOI / total;
-
-    // Sanity check: concentration should be between 0 and 1
-    if (!isFinite(concentration) || concentration < 0 || concentration > 1) {
-      return 0.5; // Default to 50% if invalid
-    }
-    return concentration;
-  }
-
-  private getAverageOI(symbol: string): number {
-    const history = this.historicalOI.get(symbol) || [];
-    if (history.length === 0) return 0;
-    return history.reduce((sum, v) => sum + v, 0) / history.length;
-  }
-
-  private getRiskLevel(score: number): CascadeRisk['riskLevel'] {
-    if (score >= 80) return 'critical';
-    if (score >= 60) return 'high';
-    if (score >= 40) return 'elevated';
-    if (score >= 20) return 'moderate';
-    return 'low';
-  }
-
-  private describeFunding(rate: number): string {
-    const pct = (rate * 100).toFixed(4);
-    const direction = rate > 0 ? 'longs paying shorts' : 'shorts paying longs';
-    const absRate = Math.abs(rate);
-
-    if (absRate >= THRESHOLDS.FUNDING_CRITICAL) {
-      return `Critical: ${pct}% (${direction})`;
-    }
-    if (absRate >= THRESHOLDS.FUNDING_HIGH) {
-      return `High: ${pct}% (${direction})`;
-    }
-    if (absRate >= THRESHOLDS.FUNDING_ELEVATED) {
-      return `Elevated: ${pct}% (${direction})`;
-    }
-    return `Normal: ${pct}%`;
-  }
-
-  private describeOI(symbol: string, currentOI: number): string {
-    const avgOI = this.getAverageOI(symbol);
-    if (avgOI === 0) return 'Building historical baseline...';
-
-    const ratio = currentOI / avgOI;
-    const pctChange = ((ratio - 1) * 100).toFixed(1);
-
-    if (ratio >= THRESHOLDS.OI_CRITICAL) {
-      return `Critical: ${pctChange}% above average`;
-    }
-    if (ratio >= THRESHOLDS.OI_HIGH) {
-      return `High: ${pctChange}% above average`;
-    }
-    if (ratio >= THRESHOLDS.OI_ELEVATED) {
-      return `Elevated: ${pctChange}% above average`;
-    }
-    return `Normal: ${ratio >= 1 ? '+' : ''}${pctChange}% vs average`;
-  }
+  // -----------------------------------------------------------------------
+  // Internal helpers
+  // -----------------------------------------------------------------------
 
   private generatePrediction(
-    symbol: string,
     metrics: AggregatedData['metrics'][string],
     riskScore: number,
-    factors: CascadeFactor[]
+    stressZ: number,
   ): CascadePrediction {
     const direction: CascadePrediction['direction'] =
       metrics.avgFundingRate > 0 ? 'long_squeeze' : 'short_squeeze';
 
-    // Probability calculation with bounds checking
-    // riskScore should be >= 40 when this is called (checked at line 181)
-    const rawProbability = Math.max(0, (riskScore - 20) / 100);
-    const probability = Math.min(0.85, Math.max(0.1, rawProbability));
+    const probability = Math.min(0.95, Math.max(0.05,
+      calibrateProbability(riskScore, this.cfg.calibration),
+    ));
 
-    // Estimate impact based on OI and risk level
-    // liquidationPct ranges from 3% to 10% based on risk
-    const liquidationPct = 0.03 + (Math.min(100, Math.max(0, riskScore)) / 100) * 0.07;
+    const severity = riskScore / 100;
+
     const totalOI = Math.max(0, metrics.totalOpenInterestValue || 0);
-    const estimatedImpact = isFinite(totalOI) ? totalOI * liquidationPct : 0;
+    const liquidationPct = 0.03 + severity * 0.07;
+    const estimatedImpact = Number.isFinite(totalOI) ? totalOI * liquidationPct : 0;
 
-    // Trigger distance (2% to 6% from current price)
-    const triggerDistance = Math.max(2, 6 - (riskScore / 100) * 4);
+    const triggerDistance = Math.max(2, 6 - severity * 4);
 
-    // Calculate trigger price with validation
     const basePrice = metrics.oraclePrice || metrics.avgMarkPrice || 0;
-    if (!isFinite(basePrice) || basePrice <= 0) {
-      // Return safe defaults if price is invalid
-      return {
-        direction,
-        probability,
-        estimatedImpact: 0,
-        timeWindow: '12-24 hours',
-        triggerPrice: 0,
-        triggerDistance,
-      };
+    if (!Number.isFinite(basePrice) || basePrice <= 0) {
+      return { direction, probability, estimatedImpact: 0, timeWindow: '12-24 hours', triggerPrice: 0, triggerDistance };
     }
 
-    const priceMultiplier = direction === 'long_squeeze'
+    const multiplier = direction === 'long_squeeze'
       ? 1 - triggerDistance / 100
       : 1 + triggerDistance / 100;
-    const triggerPrice = basePrice * priceMultiplier;
+    const triggerPrice = basePrice * multiplier;
 
-    // Time window based on funding rate urgency
-    const fundingFactor = factors.find(f => f.name === 'Funding Rate');
-    const urgency = fundingFactor?.score ?? 30;
-    const timeWindow = urgency >= 70 ? '1-4 hours' :
-                       urgency >= 50 ? '4-12 hours' :
-                       '12-24 hours';
+    const absZ = Math.abs(stressZ);
+    const timeWindow = absZ >= 3 ? '1-4 hours' : absZ >= 2 ? '4-12 hours' : '12-24 hours';
 
     return {
       direction,
-      probability: isFinite(probability) ? probability : 0.5,
-      estimatedImpact: isFinite(estimatedImpact) ? estimatedImpact : 0,
+      probability: Number.isFinite(probability) ? probability : 0.5,
+      estimatedImpact: Number.isFinite(estimatedImpact) ? estimatedImpact : 0,
       timeWindow,
-      triggerPrice: isFinite(triggerPrice) ? triggerPrice : 0,
-      triggerDistance: isFinite(triggerDistance) ? triggerDistance : 4,
+      triggerPrice: Number.isFinite(triggerPrice) ? triggerPrice : 0,
+      triggerDistance: Number.isFinite(triggerDistance) ? triggerDistance : 4,
     };
   }
 }

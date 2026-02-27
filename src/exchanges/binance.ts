@@ -1,122 +1,155 @@
-import axios from 'axios';
-import type { ExchangeClient, OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
+import { BaseExchangeClient } from './base.js';
+import type { OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
 
 const BASE_URL = 'https://fapi.binance.com';
 
-// Binance uses specific symbol format: BTCUSDT, ETHUSDT
 function toExchangeSymbol(symbol: string): string {
   return `${symbol}USDT`;
 }
 
-export class BinanceClient implements ExchangeClient {
-  name = 'binance';
+interface BinancePremiumIndex {
+  markPrice: string;
+  indexPrice: string;
+  lastFundingRate: string;
+  nextFundingTime: number;
+}
+
+export class BinanceClient extends BaseExchangeClient {
+  readonly name = 'binance';
+
+  constructor() {
+    super(BASE_URL);
+  }
 
   async getOpenInterest(symbol: string): Promise<OpenInterest> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const [oiResponse, priceResponse] = await Promise.all([
-        axios.get(`${BASE_URL}/fapi/v1/openInterest`, {
-          params: { symbol: exchangeSymbol },
-          timeout: 10000,
-        }),
-        axios.get(`${BASE_URL}/fapi/v1/ticker/price`, {
-          params: { symbol: exchangeSymbol },
-          timeout: 10000,
-        }),
-      ]);
+    const [oiRes, priceRes] = await Promise.all([
+      this.request<{ openInterest: string }>('GET', '/fapi/v1/openInterest', {
+        params: { symbol: exchangeSymbol },
+      }),
+      this.request<{ price: string }>('GET', '/fapi/v1/ticker/price', {
+        params: { symbol: exchangeSymbol },
+      }),
+    ]);
 
-      const oi = parseFloat(oiResponse.data.openInterest) || 0;
-      const price = parseFloat(priceResponse.data.price) || 0;
+    const oi = this.toNonNegative(oiRes.openInterest, 'openInterest');
+    const price = this.toNonNegative(priceRes.price, 'price');
+    const oiValue = oi * price;
 
-      // Sanity check: OI value should be reasonable (< $500B)
-      const oiValue = oi * price;
-      if (isNaN(oiValue) || oiValue > 500_000_000_000) {
-        return { exchange: this.name, symbol, openInterest: 0, openInterestValue: 0, timestamp: Date.now() };
-      }
-
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: oi,
-        openInterestValue: oiValue,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return { exchange: this.name, symbol, openInterest: 0, openInterestValue: 0, timestamp: Date.now() };
-    }
+    return {
+      exchange: this.name,
+      symbol,
+      openInterest: oi,
+      openInterestValue: oiValue,
+      timestamp: this.now(),
+    };
   }
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/fapi/v1/premiumIndex`, {
-        params: { symbol: exchangeSymbol },
-        timeout: 10000,
-      });
+    const res = await this.request<BinancePremiumIndex>('GET', '/fapi/v1/premiumIndex', {
+      params: { symbol: exchangeSymbol },
+    });
 
-      const fundingRate = parseFloat(response.data.lastFundingRate) || 0;
+    const fundingRate = this.toFiniteNumber(res.lastFundingRate, 'lastFundingRate');
 
-      // Sanity check: funding rate should be reasonable (< 1%)
-      if (isNaN(fundingRate) || Math.abs(fundingRate) > 0.01) {
-        return { exchange: this.name, symbol, fundingRate: 0, fundingTime: Date.now(), timestamp: Date.now() };
-      }
-
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate,
-        fundingTime: response.data.nextFundingTime || Date.now(),
-        timestamp: Date.now(),
-      };
-    } catch {
-      return { exchange: this.name, symbol, fundingRate: 0, fundingTime: Date.now(), timestamp: Date.now() };
-    }
+    return {
+      exchange: this.name,
+      symbol,
+      fundingRate,
+      fundingTime: res.nextFundingTime || this.now(),
+      timestamp: this.now(),
+    };
   }
 
   async getMarkPrice(symbol: string): Promise<MarkPrice> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/fapi/v1/premiumIndex`, {
-        params: { symbol: exchangeSymbol },
-        timeout: 10000,
-      });
+    const res = await this.request<BinancePremiumIndex>('GET', '/fapi/v1/premiumIndex', {
+      params: { symbol: exchangeSymbol },
+    });
 
-      const markPrice = parseFloat(response.data.markPrice) || 0;
-      const indexPrice = parseFloat(response.data.indexPrice) || 0;
+    const markPrice = this.toNonNegative(res.markPrice, 'markPrice');
+    const indexPrice = this.toNonNegative(res.indexPrice, 'indexPrice');
 
-      // Sanity check: prices should be positive
-      if (isNaN(markPrice) || markPrice <= 0) {
-        return { exchange: this.name, symbol, markPrice: 0, indexPrice: 0, timestamp: Date.now() };
-      }
-
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice,
-        indexPrice: indexPrice || markPrice,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return { exchange: this.name, symbol, markPrice: 0, indexPrice: 0, timestamp: Date.now() };
-    }
-  }
-
-  async getAllData(symbols: string[]): Promise<ExchangeData> {
-    const [openInterest, fundingRates, markPrices] = await Promise.all([
-      Promise.all(symbols.map(s => this.getOpenInterest(s))),
-      Promise.all(symbols.map(s => this.getFundingRate(s))),
-      Promise.all(symbols.map(s => this.getMarkPrice(s))),
-    ]);
+    this.assertPriceDeviation(markPrice, indexPrice, symbol);
 
     return {
       exchange: this.name,
-      openInterest,
-      fundingRates,
-      markPrices,
-      timestamp: Date.now(),
+      symbol,
+      markPrice,
+      indexPrice: indexPrice || markPrice,
+      timestamp: this.now(),
     };
+  }
+
+  /**
+   * Batch-optimized: 2 calls per symbol (premiumIndex + openInterest).
+   * Eliminates duplicate premiumIndex calls and separate ticker/price fetch.
+   * Down from 4 calls/symbol to 2 calls/symbol.
+   */
+  async getAllData(symbols: string[]): Promise<ExchangeData> {
+    const openInterest: OpenInterest[] = [];
+    const fundingRates: FundingRate[] = [];
+    const markPrices: MarkPrice[] = [];
+    const now = this.now();
+
+    const results = await Promise.all(
+      symbols.map(async (symbol) => {
+        const exchangeSymbol = toExchangeSymbol(symbol);
+        try {
+          const [premiumIndex, oiRes] = await Promise.all([
+            this.request<BinancePremiumIndex>('GET', '/fapi/v1/premiumIndex', {
+              params: { symbol: exchangeSymbol },
+            }),
+            this.request<{ openInterest: string }>('GET', '/fapi/v1/openInterest', {
+              params: { symbol: exchangeSymbol },
+            }),
+          ]);
+          return { symbol, premiumIndex, oiRes };
+        } catch (err) {
+          this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData fetch failed');
+          return null;
+        }
+      }),
+    );
+
+    for (const result of results) {
+      if (!result) continue;
+      const { symbol, premiumIndex, oiRes } = result;
+      try {
+        const markPrice = this.toNonNegative(premiumIndex.markPrice, 'markPrice');
+        const indexPrice = this.toNonNegative(premiumIndex.indexPrice, 'indexPrice');
+        const oi = this.toNonNegative(oiRes.openInterest, 'openInterest');
+        const fundingRate = this.toFiniteNumber(premiumIndex.lastFundingRate, 'lastFundingRate');
+
+        this.assertPriceDeviation(markPrice, indexPrice, symbol);
+
+        openInterest.push({
+          exchange: this.name, symbol,
+          openInterest: oi,
+          openInterestValue: oi * markPrice,
+          timestamp: now,
+        });
+        fundingRates.push({
+          exchange: this.name, symbol,
+          fundingRate,
+          fundingTime: premiumIndex.nextFundingTime || now,
+          timestamp: now,
+        });
+        markPrices.push({
+          exchange: this.name, symbol,
+          markPrice,
+          indexPrice: indexPrice || markPrice,
+          timestamp: now,
+        });
+      } catch (err) {
+        this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData parse failed');
+      }
+    }
+
+    return { exchange: this.name, openInterest, fundingRates, markPrices, timestamp: now };
   }
 }

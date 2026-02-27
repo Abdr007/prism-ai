@@ -4,27 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Prism** — Cross-exchange AI risk intelligence API for perpetual futures markets.
+**PRISM AI** — Cross-exchange liquidation cascade detection for perpetual futures markets.
 
-Aggregates data from 5 exchanges (Binance, Bybit, OKX, dYdX, Hyperliquid) to detect liquidation cascade patterns, funding rate risks, and market stress signals. Features real-time WebSocket streaming, cascade prediction engine, and a modern React dashboard.
+Aggregates real-time data from 11 exchanges (8 CEX + 3 DEX) across 25 symbols. Uses a signal-focused stress engine with percentile-based scoring, volatility regime conditioning, and logistic calibration to predict liquidation cascades. Features REST API, WebSocket streaming, webhook delivery, and a React dashboard.
 
 ## Commands
 
 ```bash
 # Backend
-npm run fetch     # One-shot: fetch and display live data
-npm run monitor   # Terminal dashboard with cascade prediction
-npm run api       # Start API + WebSocket server on :3000
+npm run fetch       # One-shot: fetch and display live data
+npm run monitor     # Terminal dashboard with cascade prediction
+npm run api         # Start API + WebSocket server on :3000
 
 # Dashboard
-npm run dashboard # Start React dashboard on :5173
+npm run dashboard   # Start React dashboard on :5173
 
 # Setup
-npm run install:all  # Install all dependencies (backend + dashboard)
+npm run install:all # Install all dependencies (backend + dashboard)
 
 # Docker
-docker-compose up -d        # Start API + Dashboard in production
+docker-compose up -d        # Start PostgreSQL + API + Dashboard
 docker-compose logs -f api  # View API logs
+
+# Evaluation
+npx tsx scripts/run-evaluation.ts   # Synthetic backtest (no DB needed)
 ```
 
 ## Architecture
@@ -32,90 +35,62 @@ docker-compose logs -f api  # View API logs
 ```
 prism-ai/
 ├── src/
-│   ├── exchanges/       # Exchange API clients (5 exchanges)
-│   ├── aggregator/      # Cross-exchange data merging
-│   ├── predictor/       # Cascade prediction engine (risk 0-100)
-│   ├── monitor/         # Continuous polling service
-│   ├── websocket/       # Real-time WebSocket server
-│   ├── webhooks/        # Webhook delivery system
-│   ├── onboarding/      # Exchange account management
-│   ├── alerts/          # Telegram, Discord notifications
-│   ├── middleware/      # Auth, rate limiting
-│   ├── db/              # SQLite persistence
-│   └── api/
-│       ├── server.ts    # Express REST API
-│       └── routes/      # Admin, account, webhook routes
-├── sdk/                 # @prism-ai/sdk npm package
-├── dashboard/           # React + Vite + Tailwind frontend
-├── docs/                # API documentation
-├── Dockerfile           # API container
-└── docker-compose.yml   # Full stack deployment
+│   ├── exchanges/         # 11 exchange clients (inherit BaseExchangeClient)
+│   │   └── base.ts        # Abstract base: retry, rate-limit, validation
+│   ├── aggregator/        # Cross-exchange data merging & z-scores
+│   ├── predictor/         # Stress engine
+│   │   ├── cascade.ts     # StressEngine: percentile scoring, vol regimes
+│   │   ├── cascadeDetector.ts  # Ground-truth cascade detection
+│   │   └── calibration.ts # Logistic regression calibration
+│   ├── backtest/          # Evaluation framework (P/R/F1, threshold sweep)
+│   ├── db/                # PostgreSQL (async pg, connection pooling)
+│   │   ├── schema.sql     # DDL for 5 core tables
+│   │   └── cascadeRepository.ts
+│   ├── api/
+│   │   ├── server.ts      # Express REST API
+│   │   └── routes/        # Admin, auth, account, webhook, stock, news
+│   ├── websocket/         # Real-time WebSocket server
+│   ├── oracle/            # Pyth Network price oracle
+│   ├── stocks/            # Stock market data
+│   ├── middleware/        # Security, auth, rate limiting, data validation
+│   ├── observability/     # Exchange metrics, latency, health
+│   ├── lib/               # Structured JSON logger
+│   ├── webhooks/          # HMAC-signed webhook delivery
+│   └── onboarding/        # Multi-tenant exchange account management
+├── scripts/
+│   ├── migrate-sqlite-to-pg.ts  # SQLite → PostgreSQL migration
+│   └── run-evaluation.ts        # Synthetic backtest harness
+├── dashboard/             # React + Vite + Tailwind frontend
+├── sdk/                   # @prism-ai/sdk npm package
+├── docs/                  # API documentation
+├── Dockerfile             # API container
+└── docker-compose.yml     # PostgreSQL + API + Dashboard
 ```
 
-## Key Features
+## Key Design Decisions
 
-**Data Layer**: 5 exchanges, 5 symbols (BTC, ETH, SOL, DOGE, XRP)
+**Database**: PostgreSQL 16 with async `pg` client, connection pooling, and optional TimescaleDB hypertables.
 
-**Cascade Prediction**: Risk score 0-100 based on:
-- Funding Rate (30%) — elevated rates signal overcrowded positions
-- Open Interest Level (25%) — vs rolling average
-- Funding Divergence (20%) — spread between exchanges
-- Price Deviation (15%) — oracle discrepancies
-- OI Concentration (10%) — single-exchange dominance
+**Stress Engine**: Single-signal architecture using price deviation as primary stress indicator. Percentile-rank → dynamic thresholds → vol regime scaling → logistic calibration → risk score 0-100 with P(cascade).
 
-**WebSocket**: Real-time streaming at `ws://localhost:3000/ws`
-- Events: `connected`, `data`, `risk`, `alert`, `ping/pong`
+**Exchange Clients**: All 11 inherit `BaseExchangeClient` for retry (3x exponential backoff), rate-limit handling (HTTP 429), strict numeric validation, and structured logging.
 
-**Alerts**: Configure via environment variables:
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- `DISCORD_WEBHOOK_URL`
-- `ALERT_WEBHOOK_URL`
+**Logging**: All output through structured JSON logger (`src/lib/logger.ts`). No `console.log`.
 
-**Auth**: API key authentication via `X-API-Key` header, admin via `X-Admin-Secret`
-
-## B2B Features
-
-**Exchange Onboarding**: Multi-tenant system for exchange clients
-- Plans: starter (60 req/min, 2 symbols), growth (300/min, 5 symbols), enterprise (1000/min, 10 symbols)
-- API key generation, rotation, suspension
-
-**Webhook System**: Push alerts to exchange endpoints
-- Events: `data`, `risk`, `alert`
-- HMAC-SHA256 signature verification
-- Retry with exponential backoff
-
-**SDK**: Official npm package `@prism-ai/sdk`
-- REST and WebSocket client
-- Webhook signature verification middleware
+**Data Validation**: Pre-aggregation quality gate (`DataValidator`) rejects stale data, NaN/Infinity, and excessive price deviations.
 
 ## API Endpoints
 
-**Public:**
-- `GET /api/v1/data` — aggregated metrics
-- `GET /api/v1/risk` — cascade risk analysis
-- `GET /api/v1/symbols` — list symbols
-- `GET /api/v1/alerts` — active risk alerts
+**Public:** `/api/v1/health`, `/api/v1/data`, `/api/v1/risk`, `/api/v1/symbols`, `/api/v1/alerts`, `/api/v1/stocks`, `/api/v1/news`
 
-**Client (API Key):**
-- `GET /api/v1/client/data` — data filtered by plan
-- `GET /api/v1/client/risk` — risk filtered by plan
-- `GET /api/v1/account` — account info
-- `POST /api/v1/webhooks` — register webhook
+**Client (X-API-Key):** `/api/v1/client/data`, `/api/v1/client/risk`, `/api/v1/account`, `/api/v1/webhooks`
 
-**Admin (Admin Secret):**
-- `POST /api/v1/admin/exchanges` — create exchange
-- `GET /api/v1/admin/exchanges` — list exchanges
-- `POST /api/v1/admin/exchanges/:id/suspend` — suspend
+**Admin (X-Admin-Secret):** `/api/v1/admin/exchanges` (CRUD + suspend)
 
-See [docs/API.md](docs/API.md) for full documentation.
+**WebSocket:** `ws://localhost:3000/ws` — events: `connected`, `data`, `risk`, `alert`
 
-## Dashboard
+## B2B Plans
 
-Modern React dashboard with:
-- Real-time WebSocket updates
-- Risk gauge visualization
-- Exchange distribution chart
-- Alert panel
-- Asset selector
-
-Run with: `npm run api` (backend) + `npm run dashboard` (frontend)
+- **Starter**: 60 req/min, 2 symbols
+- **Growth**: 300 req/min, 5 symbols, WebSocket
+- **Enterprise**: 1000 req/min, 10 symbols, WebSocket, priority support

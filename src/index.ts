@@ -1,5 +1,9 @@
 import { BinanceClient, BybitClient, OKXClient, DYDXClient, HyperliquidClient } from './exchanges/index.js';
 import { DataAggregator } from './aggregator/index.js';
+import { DataValidator } from './middleware/validation.js';
+import { logger as rootLogger } from './lib/logger.js';
+
+const log = rootLogger.child({ component: 'fetch' });
 
 const SYMBOLS = ['BTC', 'ETH'];
 
@@ -18,11 +22,12 @@ function formatFundingRate(rate: number): string {
 }
 
 async function main() {
-  console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║                    PRISM - Risk Intelligence               ║');
-  console.log('║           Cross-Exchange Perpetual Futures Monitor         ║');
-  console.log('╚════════════════════════════════════════════════════════════╝');
-  console.log();
+  const w = (s: string) => process.stdout.write(s + '\n');
+  w('╔════════════════════════════════════════════════════════════╗');
+  w('║                    PRISM - Risk Intelligence               ║');
+  w('║           Cross-Exchange Perpetual Futures Monitor         ║');
+  w('╚════════════════════════════════════════════════════════════╝');
+  w('');
 
   const clients = [
     new BinanceClient(),
@@ -33,75 +38,79 @@ async function main() {
   ];
 
   const aggregator = new DataAggregator(clients);
+  const validator = new DataValidator();
 
-  console.log(`Fetching data from ${clients.length} exchanges...`);
-  console.log(`Symbols: ${SYMBOLS.join(', ')}`);
-  console.log();
+  w(`Fetching data from ${clients.length} exchanges...`);
+  w(`Symbols: ${SYMBOLS.join(', ')}`);
+  w('');
 
   try {
-    const data = await aggregator.run(SYMBOLS);
+    // Fetch → Validate → Aggregate (no bypass)
+    const rawData = await aggregator.fetchAll(SYMBOLS);
+    const validatedData = validator.validateBatch(rawData);
+    const data = await aggregator.aggregate(validatedData, SYMBOLS);
 
-    console.log(`✓ Data fetched from: ${data.exchanges.join(', ')}`);
-    console.log(`  Timestamp: ${new Date(data.timestamp).toISOString()}`);
-    console.log();
+    w(`✓ Data fetched from: ${data.exchanges.join(', ')}`);
+    w(`  Timestamp: ${new Date(data.timestamp).toISOString()}`);
+    w('');
 
     // Display metrics for each symbol
     for (const symbol of SYMBOLS) {
       const m = data.metrics[symbol];
       if (!m) continue;
 
-      console.log('─'.repeat(60));
-      console.log(`  ${symbol}/USDT PERPETUAL`);
-      console.log('─'.repeat(60));
+      w('─'.repeat(60));
+      w(`  ${symbol}/USDT PERPETUAL`);
+      w('─'.repeat(60));
 
-      console.log();
-      console.log('  OPEN INTEREST');
-      console.log(`  Total: ${formatUSD(m.totalOpenInterestValue)}`);
+      w('');
+      w('  OPEN INTEREST');
+      w(`  Total: ${formatUSD(m.totalOpenInterestValue)}`);
       for (const [exchange, value] of Object.entries(m.openInterestByExchange)) {
         const pct = ((value / m.totalOpenInterestValue) * 100).toFixed(1);
-        console.log(`    ${exchange.padEnd(10)} ${formatUSD(value).padStart(12)}  (${pct}%)`);
+        w(`    ${exchange.padEnd(10)} ${formatUSD(value).padStart(12)}  (${pct}%)`);
       }
 
-      console.log();
-      console.log('  FUNDING RATE (8h)');
-      console.log(`  Average: ${formatFundingRate(m.avgFundingRate)}`);
+      w('');
+      w('  FUNDING RATE (8h)');
+      w(`  Average: ${formatFundingRate(m.avgFundingRate)}`);
       for (const [exchange, rate] of Object.entries(m.fundingRateByExchange)) {
-        console.log(`    ${exchange.padEnd(10)} ${formatFundingRate(rate).padStart(12)}`);
+        w(`    ${exchange.padEnd(10)} ${formatFundingRate(rate).padStart(12)}`);
       }
 
-      console.log();
-      console.log('  MARK PRICE');
-      console.log(`  Average: $${m.avgMarkPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
-      console.log(`  Cross-exchange deviation: ${m.priceDeviation.toFixed(4)}%`);
+      w('');
+      w('  MARK PRICE');
+      w(`  Average: $${m.avgMarkPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+      w(`  Cross-exchange deviation: ${m.priceDeviation.toFixed(4)}%`);
       for (const [exchange, price] of Object.entries(m.markPriceByExchange)) {
-        console.log(`    ${exchange.padEnd(10)} $${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+        w(`    ${exchange.padEnd(10)} $${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
       }
-      console.log();
+      w('');
     }
 
     // Display risk signals
     if (data.riskSignals.length > 0) {
-      console.log('═'.repeat(60));
-      console.log('  RISK SIGNALS');
-      console.log('═'.repeat(60));
-      console.log();
+      w('═'.repeat(60));
+      w('  RISK SIGNALS');
+      w('═'.repeat(60));
+      w('');
 
       for (const signal of data.riskSignals) {
         const icon = signal.severity === 'critical' ? '🔴' :
                      signal.severity === 'high' ? '🟠' :
                      signal.severity === 'medium' ? '🟡' : '🟢';
-        console.log(`  ${icon} [${signal.severity.toUpperCase()}] ${signal.symbol}: ${signal.message}`);
+        w(`  ${icon} [${signal.severity.toUpperCase()}] ${signal.symbol}: ${signal.message}`);
       }
-      console.log();
+      w('');
     } else {
-      console.log('═'.repeat(60));
-      console.log('  ✓ No significant risk signals detected');
-      console.log('═'.repeat(60));
-      console.log();
+      w('═'.repeat(60));
+      w('  ✓ No significant risk signals detected');
+      w('═'.repeat(60));
+      w('');
     }
 
   } catch (error) {
-    console.error('Error fetching data:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Error fetching data');
     process.exit(1);
   }
 }

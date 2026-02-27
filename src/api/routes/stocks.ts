@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { fetchAllStocks, fetchStockQuote, calculateStockRisk, STOCK_SYMBOLS, StockQuote, StockRisk } from '../../stocks/client';
+import { fetchAllStocks, fetchStockQuote, calculateStockRisk, STOCK_SYMBOLS, StockQuote, StockRisk } from '../../stocks/client.js';
+import { logger as rootLogger } from '../../lib/logger.js';
+
+const log = rootLogger.child({ component: 'stocks-routes' });
 
 const router = Router();
 
@@ -19,7 +22,7 @@ const CACHE_TTL = 60000; // 1 minute cache
 // Refresh stock data
 async function refreshStockData(): Promise<void> {
   try {
-    console.log('[Stocks] Refreshing stock data...');
+    log.info('Refreshing stock data');
     const quotes = await fetchAllStocks();
     const risks = quotes.map(q => calculateStockRisk(q));
 
@@ -28,9 +31,9 @@ async function refreshStockData(): Promise<void> {
       risks,
       timestamp: Date.now(),
     };
-    console.log(`[Stocks] Refreshed ${quotes.length} stocks`);
+    log.info({ count: quotes.length }, 'Stock data refreshed');
   } catch (error) {
-    console.error('[Stocks] Failed to refresh:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Failed to refresh stock data');
   }
 }
 
@@ -57,7 +60,7 @@ router.get('/', async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    console.error('[Stocks] Error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Stocks endpoint error');
     res.status(500).json({ success: false, error: 'Failed to fetch stocks' });
   }
 });
@@ -75,7 +78,7 @@ router.get('/risk', async (req: Request, res: Response) => {
       timestamp: stockCache.timestamp,
     });
   } catch (error) {
-    console.error('[Stocks] Risk error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Stocks risk endpoint error');
     res.status(500).json({ success: false, error: 'Failed to fetch stock risks' });
   }
 });
@@ -83,7 +86,7 @@ router.get('/risk', async (req: Request, res: Response) => {
 // GET /api/v1/stocks/:symbol - Get single stock quote
 router.get('/:symbol', async (req: Request, res: Response) => {
   try {
-    const { symbol } = req.params;
+    const symbol = req.params.symbol as string;
     const upperSymbol = symbol.toUpperCase();
 
     // Check cache first
@@ -102,7 +105,7 @@ router.get('/:symbol', async (req: Request, res: Response) => {
     const risk = calculateStockRisk(quote);
     res.json({ success: true, quote, risk });
   } catch (error) {
-    console.error('[Stocks] Symbol error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Stocks symbol endpoint error');
     res.status(500).json({ success: false, error: 'Failed to fetch stock' });
   }
 });
@@ -117,7 +120,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
       count: stockCache.quotes.length,
     });
   } catch (error) {
-    console.error('[Stocks] Refresh error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Stocks refresh endpoint error');
     res.status(500).json({ success: false, error: 'Failed to refresh' });
   }
 });

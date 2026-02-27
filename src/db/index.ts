@@ -1,281 +1,433 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import pg from 'pg';
 import fs from 'fs';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import type { AggregatedData } from '../aggregator/index.js';
 import type { CascadeRisk } from '../predictor/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/prism.db');
+
+const DEFAULT_DATABASE_URL = 'postgresql://prism:prism@localhost:5432/prism';
+
+// ---------------------------------------------------------------------------
+// Typed Row Interfaces
+// ---------------------------------------------------------------------------
+
+export interface PerpMarketDataRow {
+  time: Date;
+  symbol: string;
+  exchange: string;
+  mark_price: number;
+  index_price: number;
+  funding_rate: number;
+  open_interest: number;
+  open_interest_usd: number;
+}
+
+export interface AggregatedSnapshotRow {
+  time: Date;
+  symbol: string;
+  avg_mark_price: number;
+  avg_funding_rate: number;
+  total_oi_usd: number;
+  price_spread_pct: number;
+  funding_spread_pct: number;
+  funding_z_score: number;
+  oi_z_score: number;
+  exchange_count: number;
+}
+
+export interface RiskScoreRow {
+  time: Date;
+  symbol: string;
+  risk_score: number;
+  risk_level: string;
+  confidence: number;
+  prediction_direction: string | null;
+  prediction_probability: number | null;
+  prediction_impact_usd: number | null;
+  prediction_trigger_price: number | null;
+}
+
+export interface AlertRow {
+  id: string;
+  time: Date;
+  symbol: string;
+  alert_type: string;
+  severity: string;
+  message: string | null;
+  data: Record<string, unknown> | null;
+}
+
+export interface CascadeEventRow {
+  id: string;
+  symbol: string;
+  direction: string;
+  start_time: Date;
+  end_time: Date;
+  price_change_pct: number;
+  liquidation_volume_usd: number;
+}
+
+export interface DbStats {
+  snapshotCount: number;
+  oldestSnapshot: number | null;
+  newestSnapshot: number | null;
+  alertCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// PrismDB — PostgreSQL async repository
+// ---------------------------------------------------------------------------
 
 export class PrismDB {
-  private db: Database.Database;
+  private pool: pg.Pool;
 
-  constructor(dbPath: string = DB_PATH) {
-    // Ensure data directory exists
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+  constructor(databaseUrl?: string) {
+    const connectionString =
+      databaseUrl || process.env.DATABASE_URL || DEFAULT_DATABASE_URL;
 
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.init();
+    this.pool = new pg.Pool({
+      connectionString,
+      max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+    });
   }
 
-  private init(): void {
-    // Market data snapshots
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS market_snapshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        exchange TEXT NOT NULL,
-        open_interest REAL,
-        open_interest_value REAL,
-        funding_rate REAL,
-        mark_price REAL,
-        index_price REAL,
-        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-      );
+  // -----------------------------------------------------------------------
+  // Schema bootstrap (idempotent)
+  // -----------------------------------------------------------------------
 
-      CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON market_snapshots(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON market_snapshots(symbol);
-      CREATE INDEX IF NOT EXISTS idx_snapshots_exchange ON market_snapshots(exchange);
-    `);
-
-    // Aggregated metrics
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS aggregated_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        total_oi_value REAL,
-        avg_funding_rate REAL,
-        avg_mark_price REAL,
-        price_deviation REAL,
-        exchanges_count INTEGER,
-        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_agg_timestamp ON aggregated_metrics(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_agg_symbol ON aggregated_metrics(symbol);
-    `);
-
-    // Risk scores
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS risk_scores (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        risk_score INTEGER,
-        risk_level TEXT,
-        prediction_direction TEXT,
-        prediction_probability REAL,
-        prediction_impact REAL,
-        prediction_trigger_price REAL,
-        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_risk_timestamp ON risk_scores(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_risk_symbol ON risk_scores(symbol);
-      CREATE INDEX IF NOT EXISTS idx_risk_level ON risk_scores(risk_level);
-    `);
-
-    // Alerts history
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        alert_type TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        message TEXT,
-        data TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
-    `);
+  async ensureSchema(): Promise<void> {
+    const schemaPath = path.join(__dirname, 'schema.sql');
+    const sql = fs.readFileSync(schemaPath, 'utf-8');
+    await this.pool.query(sql);
   }
 
-  // Save market snapshot from aggregated data
-  saveSnapshot(data: AggregatedData): void {
-    const insertSnapshot = this.db.prepare(`
-      INSERT INTO market_snapshots
-      (timestamp, symbol, exchange, open_interest, open_interest_value, funding_rate, mark_price, index_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+  // -----------------------------------------------------------------------
+  // Writes
+  // -----------------------------------------------------------------------
 
-    const insertAggregated = this.db.prepare(`
-      INSERT INTO aggregated_metrics
-      (timestamp, symbol, total_oi_value, avg_funding_rate, avg_mark_price, price_deviation, exchanges_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+  async saveSnapshot(data: AggregatedData): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    const transaction = this.db.transaction(() => {
-      // Save per-exchange data
       for (const symbol of data.symbols) {
         const metrics = data.metrics[symbol];
         if (!metrics) continue;
 
-        // Save exchange-level data
+        // Per-exchange rows
         for (const exchange of data.exchanges) {
           const oi = metrics.openInterestByExchange[exchange] || 0;
           const funding = metrics.fundingRateByExchange[exchange] || 0;
           const price = metrics.markPriceByExchange[exchange] || 0;
 
-          insertSnapshot.run(
-            data.timestamp,
-            symbol,
-            exchange,
-            oi / (price || 1), // Convert back to contracts
-            oi,
-            funding,
-            price,
-            price // Using mark as index for simplicity
+          await client.query(
+            `INSERT INTO perp_market_data
+              (time, symbol, exchange, mark_price, index_price, funding_rate, open_interest, open_interest_usd)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (time, symbol, exchange) DO UPDATE SET
+              mark_price        = EXCLUDED.mark_price,
+              index_price       = EXCLUDED.index_price,
+              funding_rate      = EXCLUDED.funding_rate,
+              open_interest     = EXCLUDED.open_interest,
+              open_interest_usd = EXCLUDED.open_interest_usd`,
+            [
+              new Date(data.timestamp),
+              symbol,
+              exchange,
+              price,
+              price, // index_price same as mark for simplicity
+              funding,
+              oi / (price || 1), // contracts
+              oi,
+            ],
           );
         }
 
-        // Save aggregated metrics
-        insertAggregated.run(
-          data.timestamp,
-          symbol,
-          metrics.totalOpenInterestValue,
-          metrics.avgFundingRate,
-          metrics.avgMarkPrice,
-          metrics.priceDeviation,
-          data.exchanges.length
+        // Compute funding_spread_pct from exchange rates
+        const fundingRates = Object.values(metrics.fundingRateByExchange);
+        const fundingSpreadPct =
+          fundingRates.length >= 2
+            ? Math.max(...fundingRates) - Math.min(...fundingRates)
+            : 0;
+
+        // Aggregated row
+        await client.query(
+          `INSERT INTO aggregated_snapshots
+            (time, symbol, avg_mark_price, avg_funding_rate, total_oi_usd,
+             price_spread_pct, funding_spread_pct, exchange_count)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (time, symbol) DO UPDATE SET
+            avg_mark_price     = EXCLUDED.avg_mark_price,
+            avg_funding_rate   = EXCLUDED.avg_funding_rate,
+            total_oi_usd       = EXCLUDED.total_oi_usd,
+            price_spread_pct   = EXCLUDED.price_spread_pct,
+            funding_spread_pct = EXCLUDED.funding_spread_pct,
+            exchange_count     = EXCLUDED.exchange_count`,
+          [
+            new Date(data.timestamp),
+            symbol,
+            metrics.avgMarkPrice,
+            metrics.avgFundingRate,
+            metrics.totalOpenInterestValue,
+            metrics.priceDeviation,
+            fundingSpreadPct,
+            data.exchanges.length,
+          ],
         );
       }
-    });
 
-    transaction();
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
-  // Save risk scores
-  saveRiskScores(risks: CascadeRisk[]): void {
-    const insert = this.db.prepare(`
-      INSERT INTO risk_scores
-      (timestamp, symbol, risk_score, risk_level, prediction_direction, prediction_probability, prediction_impact, prediction_trigger_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+  async saveRiskScores(risks: CascadeRisk[]): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    const transaction = this.db.transaction(() => {
       for (const risk of risks) {
-        insert.run(
-          risk.timestamp,
-          risk.symbol,
-          risk.riskScore,
-          risk.riskLevel,
-          risk.prediction?.direction || null,
-          risk.prediction?.probability || null,
-          risk.prediction?.estimatedImpact || null,
-          risk.prediction?.triggerPrice || null
+        await client.query(
+          `INSERT INTO risk_scores
+            (time, symbol, risk_score, risk_level, confidence,
+             prediction_direction, prediction_probability,
+             prediction_impact_usd, prediction_trigger_price)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (time, symbol) DO UPDATE SET
+            risk_score               = EXCLUDED.risk_score,
+            risk_level               = EXCLUDED.risk_level,
+            confidence               = EXCLUDED.confidence,
+            prediction_direction     = EXCLUDED.prediction_direction,
+            prediction_probability   = EXCLUDED.prediction_probability,
+            prediction_impact_usd    = EXCLUDED.prediction_impact_usd,
+            prediction_trigger_price = EXCLUDED.prediction_trigger_price`,
+          [
+            new Date(risk.timestamp),
+            risk.symbol,
+            risk.riskScore,
+            risk.riskLevel,
+            risk.confidence,
+            risk.prediction?.direction || null,
+            risk.prediction?.probability || null,
+            risk.prediction?.estimatedImpact || null,
+            risk.prediction?.triggerPrice || null,
+          ],
         );
       }
-    });
 
-    transaction();
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
-  // Save alert
-  saveAlert(
+  async saveAlert(
     timestamp: number,
     symbol: string,
     alertType: string,
     severity: string,
     message: string,
-    data?: Record<string, unknown>
-  ): void {
-    this.db.prepare(`
-      INSERT INTO alerts (timestamp, symbol, alert_type, severity, message, data)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(timestamp, symbol, alertType, severity, message, data ? JSON.stringify(data) : null);
+    data?: Record<string, unknown>,
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO alerts (time, symbol, alert_type, severity, message, data)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        new Date(timestamp),
+        symbol,
+        alertType,
+        severity,
+        message,
+        data ? JSON.stringify(data) : null,
+      ],
+    );
   }
 
-  // Query methods
+  // -----------------------------------------------------------------------
+  // Reads
+  // -----------------------------------------------------------------------
 
-  getRecentSnapshots(symbol: string, limit: number = 100): unknown[] {
-    return this.db.prepare(`
-      SELECT * FROM market_snapshots
-      WHERE symbol = ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `).all(symbol, limit);
+  async getRecentSnapshots(
+    symbol: string,
+    limit: number = 100,
+  ): Promise<PerpMarketDataRow[]> {
+    const { rows } = await this.pool.query<PerpMarketDataRow>(
+      `SELECT * FROM perp_market_data
+       WHERE symbol = $1
+       ORDER BY time DESC
+       LIMIT $2`,
+      [symbol, limit],
+    );
+    return rows;
   }
 
-  getAggregatedHistory(symbol: string, hours: number = 24): unknown[] {
-    const since = Date.now() - hours * 60 * 60 * 1000;
-    return this.db.prepare(`
-      SELECT * FROM aggregated_metrics
-      WHERE symbol = ? AND timestamp > ?
-      ORDER BY timestamp ASC
-    `).all(symbol, since);
+  async getAggregatedHistory(
+    symbol: string,
+    hours: number = 24,
+  ): Promise<AggregatedSnapshotRow[]> {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const { rows } = await this.pool.query<AggregatedSnapshotRow>(
+      `SELECT * FROM aggregated_snapshots
+       WHERE symbol = $1 AND time > $2
+       ORDER BY time ASC`,
+      [symbol, since],
+    );
+    return rows;
   }
 
-  getRiskHistory(symbol: string, hours: number = 24): unknown[] {
-    const since = Date.now() - hours * 60 * 60 * 1000;
-    return this.db.prepare(`
-      SELECT * FROM risk_scores
-      WHERE symbol = ? AND timestamp > ?
-      ORDER BY timestamp ASC
-    `).all(symbol, since);
+  async getRiskHistory(
+    symbol: string,
+    hours: number = 24,
+  ): Promise<RiskScoreRow[]> {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const { rows } = await this.pool.query<RiskScoreRow>(
+      `SELECT * FROM risk_scores
+       WHERE symbol = $1 AND time > $2
+       ORDER BY time ASC`,
+      [symbol, since],
+    );
+    return rows;
   }
 
-  getHighRiskPeriods(minScore: number = 60): unknown[] {
-    return this.db.prepare(`
-      SELECT * FROM risk_scores
-      WHERE risk_score >= ?
-      ORDER BY timestamp DESC
-      LIMIT 100
-    `).all(minScore);
+  async getHighRiskPeriods(minScore: number = 60): Promise<RiskScoreRow[]> {
+    const { rows } = await this.pool.query<RiskScoreRow>(
+      `SELECT * FROM risk_scores
+       WHERE risk_score >= $1
+       ORDER BY time DESC
+       LIMIT 100`,
+      [minScore],
+    );
+    return rows;
   }
 
-  getAlerts(hours: number = 24, severity?: string): unknown[] {
-    const since = Date.now() - hours * 60 * 60 * 1000;
+  async getAlerts(
+    hours: number = 24,
+    severity?: string,
+  ): Promise<AlertRow[]> {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
     if (severity) {
-      return this.db.prepare(`
-        SELECT * FROM alerts
-        WHERE timestamp > ? AND severity = ?
-        ORDER BY timestamp DESC
-      `).all(since, severity);
+      const { rows } = await this.pool.query<AlertRow>(
+        `SELECT * FROM alerts
+         WHERE time > $1 AND severity = $2
+         ORDER BY time DESC`,
+        [since, severity],
+      );
+      return rows;
     }
 
-    return this.db.prepare(`
-      SELECT * FROM alerts
-      WHERE timestamp > ?
-      ORDER BY timestamp DESC
-    `).all(since);
+    const { rows } = await this.pool.query<AlertRow>(
+      `SELECT * FROM alerts
+       WHERE time > $1
+       ORDER BY time DESC`,
+      [since],
+    );
+    return rows;
   }
 
-  // Stats
-  getStats(): {
-    snapshotCount: number;
-    oldestSnapshot: number | null;
-    newestSnapshot: number | null;
-    alertCount: number;
-  } {
-    const snapshots = this.db.prepare(`
-      SELECT COUNT(*) as count, MIN(timestamp) as oldest, MAX(timestamp) as newest
-      FROM market_snapshots
-    `).get() as { count: number; oldest: number | null; newest: number | null };
+  async getStats(): Promise<DbStats> {
+    const snapResult = await this.pool.query(
+      `SELECT COUNT(*) AS count, MIN(time) AS oldest, MAX(time) AS newest
+       FROM perp_market_data`,
+    );
+    const alertResult = await this.pool.query(
+      `SELECT COUNT(*) AS count FROM alerts`,
+    );
 
-    const alerts = this.db.prepare(`
-      SELECT COUNT(*) as count FROM alerts
-    `).get() as { count: number };
+    const snap = snapResult.rows[0];
+    const alertCount = parseInt(alertResult.rows[0].count, 10);
 
     return {
-      snapshotCount: snapshots.count,
-      oldestSnapshot: snapshots.oldest,
-      newestSnapshot: snapshots.newest,
-      alertCount: alerts.count,
+      snapshotCount: parseInt(snap.count, 10),
+      oldestSnapshot: snap.oldest ? new Date(snap.oldest).getTime() : null,
+      newestSnapshot: snap.newest ? new Date(snap.newest).getTime() : null,
+      alertCount,
     };
   }
 
-  close(): void {
-    this.db.close();
+  // -----------------------------------------------------------------------
+  // Backtest methods
+  // -----------------------------------------------------------------------
+
+  async saveCascadeEvent(
+    startTime: Date,
+    endTime: Date,
+    symbol: string,
+    priceChangePct: number,
+    liquidationVolumeUsd: number,
+    direction: string,
+  ): Promise<string> {
+    const id = `${symbol}:${direction}:${startTime.getTime()}`;
+    await this.pool.query(
+      `INSERT INTO cascade_events
+        (id, symbol, direction, start_time, end_time,
+         price_change_pct, liquidation_volume_usd)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO NOTHING`,
+      [id, symbol, direction, startTime, endTime, priceChangePct, liquidationVolumeUsd],
+    );
+    return id;
+  }
+
+  async getCascadeEvents(
+    symbol?: string,
+    limit: number = 100,
+  ): Promise<CascadeEventRow[]> {
+    if (symbol) {
+      const { rows } = await this.pool.query<CascadeEventRow>(
+        `SELECT * FROM cascade_events
+         WHERE symbol = $1
+         ORDER BY start_time DESC
+         LIMIT $2`,
+        [symbol, limit],
+      );
+      return rows;
+    }
+
+    const { rows } = await this.pool.query<CascadeEventRow>(
+      `SELECT * FROM cascade_events
+       ORDER BY start_time DESC
+       LIMIT $1`,
+      [limit],
+    );
+    return rows;
+  }
+
+  async getRiskScoresForBacktest(
+    symbol: string,
+    startTime: Date,
+    endTime: Date,
+  ): Promise<RiskScoreRow[]> {
+    const { rows } = await this.pool.query<RiskScoreRow>(
+      `SELECT * FROM risk_scores
+       WHERE symbol = $1 AND time >= $2 AND time <= $3
+       ORDER BY time ASC`,
+      [symbol, startTime, endTime],
+    );
+    return rows;
+  }
+
+  // -----------------------------------------------------------------------
+  // Lifecycle
+  // -----------------------------------------------------------------------
+
+  /** Expose the pool so dedicated repositories (e.g. CascadeRepository) can share it. */
+  getPool(): pg.Pool {
+    return this.pool;
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end();
   }
 }

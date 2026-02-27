@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'stocks' });
 
 // Major stocks to track
 export const STOCK_SYMBOLS = [
@@ -98,7 +101,7 @@ export async function fetchStockQuote(symbol: string): Promise<StockQuote | null
       timestamp: Date.now(),
     };
   } catch (error) {
-    console.error(`[Stocks] Failed to fetch ${symbol}:`, error);
+    log.error({ symbol, err: error instanceof Error ? error.message : error }, 'Failed to fetch stock quote');
     return null;
   }
 }

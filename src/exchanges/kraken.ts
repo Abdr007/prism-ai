@@ -1,141 +1,163 @@
-import axios from 'axios';
-import type { ExchangeClient, OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
+import { BaseExchangeClient } from './base.js';
+import type { OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
 
 const BASE_URL = 'https://futures.kraken.com/derivatives/api/v3';
 
-// Kraken uses format: PF_XBTUSD for BTC perpetual
 function toExchangeSymbol(symbol: string): string {
   if (symbol === 'BTC') return 'PF_XBTUSD';
   return `PF_${symbol}USD`;
 }
 
-export class KrakenClient implements ExchangeClient {
-  name = 'kraken';
+interface KrakenTicker {
+  symbol: string;
+  openInterest: string;
+  markPrice: string;
+  indexPrice?: string;
+  fundingRate: string;
+  fundingRatePrediction?: string;
+}
+
+interface KrakenTickersResponse {
+  tickers: KrakenTicker[];
+}
+
+export class KrakenClient extends BaseExchangeClient {
+  readonly name = 'kraken';
+
+  constructor() {
+    super(BASE_URL);
+  }
+
+  /** Fetch all tickers once — single call serves OI, funding, mark price. */
+  private async fetchTicker(symbol: string): Promise<KrakenTicker> {
+    const exchangeSymbol = toExchangeSymbol(symbol);
+    const res = await this.request<KrakenTickersResponse>('GET', '/tickers');
+    const tickers = res.tickers || [];
+    const ticker = tickers.find((t) => t.symbol === exchangeSymbol);
+    if (!ticker) throw new Error(`Symbol ${exchangeSymbol} not found on Kraken`);
+    return ticker;
+  }
+
+  /** Normalize Kraken's funding rate: handle percentage format + 4h→8h conversion. */
+  private normalizeFundingRate(ticker: KrakenTicker): number {
+    let fundingRate = this.toFiniteNumber(ticker.fundingRate, 'fundingRate');
+
+    // Kraken: if value seems like a percentage (>1%), convert to decimal
+    if (Math.abs(fundingRate) > 0.01) {
+      fundingRate = fundingRate / 100;
+    }
+
+    // Normalize 4h rate → 8h rate
+    fundingRate = fundingRate * 2;
+
+    // Use predicted rate if it's more conservative
+    const predicted = parseFloat(ticker.fundingRatePrediction || '0');
+    if (Number.isFinite(predicted) && predicted !== 0) {
+      const normalizedPredicted = (Math.abs(predicted) > 0.01 ? predicted / 100 : predicted) * 2;
+      if (Math.abs(normalizedPredicted) < Math.abs(fundingRate)) {
+        fundingRate = normalizedPredicted;
+      }
+    }
+
+    return fundingRate;
+  }
 
   async getOpenInterest(symbol: string): Promise<OpenInterest> {
-    const exchangeSymbol = toExchangeSymbol(symbol);
-
-    try {
-      const response = await axios.get(`${BASE_URL}/tickers`);
-      const tickers = response.data.tickers || [];
-      const ticker = tickers.find((t: { symbol: string }) => t.symbol === exchangeSymbol);
-
-      if (!ticker) {
-        throw new Error('Symbol not found');
-      }
-
-      const oi = parseFloat(ticker.openInterest || '0');
-      const price = parseFloat(ticker.markPrice || '0');
-
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: oi,
-        openInterestValue: oi * price,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: 0,
-        openInterestValue: 0,
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  async getFundingRate(symbol: string): Promise<FundingRate> {
-    const exchangeSymbol = toExchangeSymbol(symbol);
-
-    try {
-      const response = await axios.get(`${BASE_URL}/tickers`);
-      const tickers = response.data.tickers || [];
-      const ticker = tickers.find((t: { symbol: string }) => t.symbol === exchangeSymbol);
-
-      // Kraken returns fundingRate as a decimal (e.g., 0.0001 for 0.01%)
-      // Kraken uses 4h funding periods, so we normalize to 8h by multiplying by 2
-      let fundingRate = parseFloat(ticker?.fundingRate || '0');
-
-      // Sanity check: if the value seems too high (> 1% = 0.01), it's likely wrong
-      if (isNaN(fundingRate)) {
-        fundingRate = 0;
-      } else if (Math.abs(fundingRate) > 0.01) {
-        // Likely a percentage representation, convert to decimal
-        fundingRate = fundingRate / 100;
-      }
-
-      // Normalize 4h rate to 8h rate (multiply by 2)
-      fundingRate = fundingRate * 2;
-
-      // Use fundingRatePrediction if available and seems more reasonable
-      const predictedRate = parseFloat(ticker?.fundingRatePrediction || '0');
-      if (!isNaN(predictedRate) && predictedRate !== 0 && Math.abs(predictedRate * 2) < Math.abs(fundingRate)) {
-        fundingRate = predictedRate * 2; // Also normalize prediction to 8h
-      }
-
-      // Final sanity check
-      if (Math.abs(fundingRate) > 0.01) {
-        fundingRate = 0; // Discard unreasonable values
-      }
-
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate,
-        fundingTime: Date.now() + 4 * 60 * 60 * 1000, // Kraken uses 4h funding
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate: 0,
-        fundingTime: Date.now(),
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  async getMarkPrice(symbol: string): Promise<MarkPrice> {
-    const exchangeSymbol = toExchangeSymbol(symbol);
-
-    try {
-      const response = await axios.get(`${BASE_URL}/tickers`);
-      const tickers = response.data.tickers || [];
-      const ticker = tickers.find((t: { symbol: string }) => t.symbol === exchangeSymbol);
-
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: parseFloat(ticker?.markPrice || '0'),
-        indexPrice: parseFloat(ticker?.indexPrice || ticker?.markPrice || '0'),
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: 0,
-        indexPrice: 0,
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  async getAllData(symbols: string[]): Promise<ExchangeData> {
-    const [openInterest, fundingRates, markPrices] = await Promise.all([
-      Promise.all(symbols.map(s => this.getOpenInterest(s))),
-      Promise.all(symbols.map(s => this.getFundingRate(s))),
-      Promise.all(symbols.map(s => this.getMarkPrice(s))),
-    ]);
+    const ticker = await this.fetchTicker(symbol);
+    const oi = this.toNonNegative(ticker.openInterest, 'openInterest');
+    const price = this.toNonNegative(ticker.markPrice, 'markPrice');
 
     return {
       exchange: this.name,
-      openInterest,
-      fundingRates,
-      markPrices,
-      timestamp: Date.now(),
+      symbol,
+      openInterest: oi,
+      openInterestValue: oi * price,
+      timestamp: this.now(),
     };
+  }
+
+  async getFundingRate(symbol: string): Promise<FundingRate> {
+    const ticker = await this.fetchTicker(symbol);
+    const fundingRate = this.normalizeFundingRate(ticker);
+
+    return {
+      exchange: this.name,
+      symbol,
+      fundingRate,
+      fundingTime: this.now() + 4 * 3_600_000, // Kraken 4h funding
+      timestamp: this.now(),
+    };
+  }
+
+  async getMarkPrice(symbol: string): Promise<MarkPrice> {
+    const ticker = await this.fetchTicker(symbol);
+    const markPrice = this.toNonNegative(ticker.markPrice, 'markPrice');
+    const indexPrice = this.toNonNegative(ticker.indexPrice ?? ticker.markPrice, 'indexPrice');
+
+    this.assertPriceDeviation(markPrice, indexPrice, symbol);
+
+    return {
+      exchange: this.name,
+      symbol,
+      markPrice,
+      indexPrice,
+      timestamp: this.now(),
+    };
+  }
+
+  /**
+   * Batch-optimized: 1 API call total for ALL symbols.
+   * /tickers returns every instrument — fetched once, looped for each symbol.
+   * Down from 3 calls/symbol (75 total) to 1 call total.
+   */
+  async getAllData(symbols: string[]): Promise<ExchangeData> {
+    const openInterest: OpenInterest[] = [];
+    const fundingRates: FundingRate[] = [];
+    const markPrices: MarkPrice[] = [];
+    const now = this.now();
+
+    const res = await this.request<KrakenTickersResponse>('GET', '/tickers');
+    const tickers = res.tickers || [];
+
+    for (const symbol of symbols) {
+      const exchangeSymbol = toExchangeSymbol(symbol);
+      const ticker = tickers.find((t) => t.symbol === exchangeSymbol);
+      if (!ticker) {
+        this.logger.warn({ symbol, exchangeSymbol }, 'Symbol not found in Kraken tickers');
+        continue;
+      }
+
+      try {
+        const oi = this.toNonNegative(ticker.openInterest, 'openInterest');
+        const markPrice = this.toNonNegative(ticker.markPrice, 'markPrice');
+        const indexPrice = this.toNonNegative(ticker.indexPrice ?? ticker.markPrice, 'indexPrice');
+        const fundingRate = this.normalizeFundingRate(ticker);
+
+        this.assertPriceDeviation(markPrice, indexPrice, symbol);
+
+        openInterest.push({
+          exchange: this.name, symbol,
+          openInterest: oi,
+          openInterestValue: oi * markPrice,
+          timestamp: now,
+        });
+        fundingRates.push({
+          exchange: this.name, symbol,
+          fundingRate,
+          fundingTime: now + 4 * 3_600_000,
+          timestamp: now,
+        });
+        markPrices.push({
+          exchange: this.name, symbol,
+          markPrice,
+          indexPrice,
+          timestamp: now,
+        });
+      } catch (err) {
+        this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData parse failed');
+      }
+    }
+
+    return { exchange: this.name, openInterest, fundingRates, markPrices, timestamp: now };
   }
 }

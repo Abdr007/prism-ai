@@ -2,6 +2,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import type { AggregatedData } from '../aggregator/index.js';
 import type { CascadeRisk } from '../predictor/index.js';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'websocket' });
 
 export interface WSMessage {
   type: 'data' | 'risk' | 'alert' | 'connected' | 'error' | 'ping' | 'pong';
@@ -22,7 +25,7 @@ export class PrismWebSocket {
   private init(): void {
     this.wss.on('connection', (ws: WebSocket) => {
       this.clients.add(ws);
-      console.log(`[WS] Client connected. Total: ${this.clients.size}`);
+      log.info({ totalClients: this.clients.size }, 'Client connected');
 
       // Send welcome message
       this.send(ws, {
@@ -47,11 +50,11 @@ export class PrismWebSocket {
 
       ws.on('close', () => {
         this.clients.delete(ws);
-        console.log(`[WS] Client disconnected. Total: ${this.clients.size}`);
+        log.info({ totalClients: this.clients.size }, 'Client disconnected');
       });
 
       ws.on('error', (error) => {
-        console.error('[WS] Client error:', error.message);
+        log.error({ err: error.message }, 'Client error');
         this.clients.delete(ws);
       });
     });

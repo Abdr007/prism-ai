@@ -2,6 +2,9 @@ import { BinanceClient, BybitClient, OKXClient, DYDXClient, HyperliquidClient } 
 import { PrismMonitor } from './monitor/index.js';
 import type { CascadeRisk } from './predictor/index.js';
 import type { AggregatedData } from './aggregator/index.js';
+import { logger as rootLogger } from './lib/logger.js';
+
+const log = rootLogger.child({ component: 'cli' });
 
 const SYMBOLS = ['BTC', 'ETH'];
 const POLL_INTERVAL_MS = 30_000; // 30 seconds
@@ -41,17 +44,18 @@ function getRiskBar(score: number): string {
 function renderData(data: AggregatedData, cascadeRisks: CascadeRisk[], dbStats?: { snapshotCount: number }): void {
   clearScreen();
 
-  console.log('╔══════════════════════════════════════════════════════════════════════╗');
-  console.log('║              PRISM - Cross-Exchange Risk Intelligence                ║');
-  console.log('║                    Liquidation Cascade Predictor                     ║');
-  console.log('╚══════════════════════════════════════════════════════════════════════╝');
-  console.log();
-  console.log(`  Exchanges: ${data.exchanges.join(', ')}`);
-  console.log(`  Updated:   ${new Date(data.timestamp).toLocaleTimeString()}`);
+  const w = (s: string) => process.stdout.write(s + '\n');
+  w('╔══════════════════════════════════════════════════════════════════════╗');
+  w('║              PRISM - Cross-Exchange Risk Intelligence                ║');
+  w('║                    Liquidation Cascade Predictor                     ║');
+  w('╚══════════════════════════════════════════════════════════════════════╝');
+  w('');
+  w(`  Exchanges: ${data.exchanges.join(', ')}`);
+  w(`  Updated:   ${new Date(data.timestamp).toLocaleTimeString()}`);
   if (dbStats) {
-    console.log(`  DB Records: ${dbStats.snapshotCount.toLocaleString()}`);
+    w(`  DB Records: ${dbStats.snapshotCount.toLocaleString()}`);
   }
-  console.log();
+  w('');
 
   for (const symbol of data.symbols) {
     const m = data.metrics[symbol];
@@ -59,49 +63,49 @@ function renderData(data: AggregatedData, cascadeRisks: CascadeRisk[], dbStats?:
     if (!m || !risk) continue;
 
     // Header with risk level
-    console.log('┌──────────────────────────────────────────────────────────────────────┐');
-    console.log(`│  ${symbol}/USDT  ${getRiskIcon(risk.riskLevel)} Risk: ${risk.riskScore}/100 [${getRiskBar(risk.riskScore)}] ${risk.riskLevel.toUpperCase().padStart(10)}  │`);
-    console.log('├──────────────────────────────────────────────────────────────────────┤');
+    w('┌──────────────────────────────────────────────────────────────────────┐');
+    w(`│  ${symbol}/USDT  ${getRiskIcon(risk.riskLevel)} Risk: ${risk.riskScore}/100 [${getRiskBar(risk.riskScore)}] ${risk.riskLevel.toUpperCase().padStart(10)}  │`);
+    w('├──────────────────────────────────────────────────────────────────────┤');
 
     // Market data
-    console.log(`│  Price: $${m.avgMarkPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }).padEnd(12)} OI: ${formatUSD(m.totalOpenInterestValue).padEnd(10)} Funding: ${formatFundingRate(m.avgFundingRate).padEnd(10)}│`);
-    console.log('├──────────────────────────────────────────────────────────────────────┤');
+    w(`│  Price: $${m.avgMarkPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }).padEnd(12)} OI: ${formatUSD(m.totalOpenInterestValue).padEnd(10)} Funding: ${formatFundingRate(m.avgFundingRate).padEnd(10)}│`);
+    w('├──────────────────────────────────────────────────────────────────────┤');
 
     // Risk factors
-    console.log('│  Risk Factors:                                                       │');
+    w('│  Risk Factors:                                                       │');
     for (const factor of risk.factors) {
       const scoreBar = '▓'.repeat(Math.round(factor.score / 20)) + '░'.repeat(5 - Math.round(factor.score / 20));
       const line = `│    ${factor.name.padEnd(20)} [${scoreBar}] ${factor.score.toFixed(0).padStart(3)}/100`;
-      console.log(line.padEnd(72) + '│');
+      w(line.padEnd(72) + '│');
     }
 
     // Prediction if elevated risk
     if (risk.prediction) {
-      console.log('├──────────────────────────────────────────────────────────────────────┤');
-      console.log('│  ⚠️  CASCADE PREDICTION:                                             │');
+      w('├──────────────────────────────────────────────────────────────────────┤');
+      w('│  ⚠️  CASCADE PREDICTION:                                             │');
       const pred = risk.prediction;
       const direction = pred.direction === 'long_squeeze' ? '📉 LONG SQUEEZE' : '📈 SHORT SQUEEZE';
-      console.log(`│    Direction:    ${direction.padEnd(52)}│`);
-      console.log(`│    Probability:  ${(pred.probability * 100).toFixed(0)}%`.padEnd(72) + '│');
-      console.log(`│    Est. Impact:  ${formatUSD(pred.estimatedImpact)} in liquidations`.padEnd(72) + '│');
-      console.log(`│    Trigger:      $${pred.triggerPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} (${pred.triggerDistance.toFixed(1)}% away)`.padEnd(72) + '│');
-      console.log(`│    Time Window:  ${pred.timeWindow}`.padEnd(72) + '│');
+      w(`│    Direction:    ${direction.padEnd(52)}│`);
+      w(`│    Probability:  ${(pred.probability * 100).toFixed(0)}%`.padEnd(72) + '│');
+      w(`│    Est. Impact:  ${formatUSD(pred.estimatedImpact)} in liquidations`.padEnd(72) + '│');
+      w(`│    Trigger:      $${pred.triggerPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} (${pred.triggerDistance.toFixed(1)}% away)`.padEnd(72) + '│');
+      w(`│    Time Window:  ${pred.timeWindow}`.padEnd(72) + '│');
     }
 
-    console.log('└──────────────────────────────────────────────────────────────────────┘');
-    console.log();
+    w('└──────────────────────────────────────────────────────────────────────┘');
+    w('');
   }
 
   // Alert summary
   const criticalRisks = cascadeRisks.filter(r => r.riskLevel === 'critical' || r.riskLevel === 'high');
   if (criticalRisks.length > 0) {
-    console.log('⚠️  HIGH RISK ASSETS: ' + criticalRisks.map(r => `${r.symbol} (${r.riskScore})`).join(', '));
+    w('⚠️  HIGH RISK ASSETS: ' + criticalRisks.map(r => `${r.symbol} (${r.riskScore})`).join(', '));
   } else {
-    console.log('✅ All assets within normal risk parameters');
+    w('✅ All assets within normal risk parameters');
   }
 
-  console.log();
-  console.log('  Press Ctrl+C to stop');
+  w('');
+  w('  Press Ctrl+C to stop');
 }
 
 async function main(): Promise<void> {
@@ -119,29 +123,29 @@ async function main(): Promise<void> {
     persistData: true, // Enable database persistence
   });
 
-  monitor.on('cascade', (risks: CascadeRisk[]) => {
+  monitor.on('cascade', async (risks: CascadeRisk[]) => {
     const data = monitor.getLastData();
     if (!data) return;
 
     const db = monitor.getDatabase();
-    const dbStats = db ? db.getStats() : undefined;
+    const dbStats = db ? await db.getStats() : undefined;
     renderData(data, risks, dbStats);
   });
 
   monitor.on('error', (error: Error) => {
-    console.error('Monitor error:', error.message);
+    log.error({ err: error.message }, 'Monitor error');
   });
 
   // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    monitor.stop();
+  process.on('SIGINT', async () => {
+    log.info('Shutting down');
+    await monitor.stop();
     process.exit(0);
   });
 
-  console.log('Starting Prism monitor with cascade prediction...');
-  console.log('Data will be persisted to ./data/prism.db');
+  log.info('Starting Prism monitor with cascade prediction');
+  log.info('Data will be persisted to PostgreSQL');
   await monitor.start();
 }
 
-main().catch(console.error);
+main().catch((err) => log.error({ err: err instanceof Error ? err.message : err }, 'Fatal error'));

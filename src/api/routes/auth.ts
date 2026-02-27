@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import { logger as rootLogger } from '../../lib/logger.js';
+
+const log = rootLogger.child({ component: 'auth-routes' });
 
 const router = Router();
 
@@ -19,7 +22,7 @@ interface LoginNotification {
 // Send Telegram notification
 async function sendTelegramNotification(message: string): Promise<void> {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('[Auth] Telegram not configured, skipping notification');
+    log.info('Telegram not configured, skipping notification');
     return;
   }
 
@@ -29,9 +32,9 @@ async function sendTelegramNotification(message: string): Promise<void> {
       text: message,
       parse_mode: 'HTML',
     });
-    console.log('[Auth] Telegram notification sent');
+    log.info('Telegram notification sent');
   } catch (error) {
-    console.error('[Auth] Failed to send Telegram notification:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Failed to send Telegram notification');
   }
 }
 
@@ -90,7 +93,7 @@ router.post('/login-notify', async (req: Request, res: Response) => {
     }
 
     // Log the login
-    console.log(`[Auth] New login: ${data.provider} - ${data.displayName || data.userId}`);
+    log.info({ provider: data.provider, user: data.displayName || data.userId }, 'New login');
 
     // Send Telegram notification
     const message = formatLoginMessage(data);
@@ -106,7 +109,7 @@ router.post('/login-notify', async (req: Request, res: Response) => {
       message: 'Login notification sent',
     });
   } catch (error) {
-    console.error('[Auth] Error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Auth route error');
     res.status(500).json({
       success: false,
       error: 'Internal server error',

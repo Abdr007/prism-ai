@@ -12,8 +12,7 @@ import {
   DYDXClient,
   HyperliquidClient,
   GMXClient,
-  JupiterClient,
-  FlashClient
+  BaseExchangeClient,
 } from '../exchanges/index.js';
 import { DataAggregator, type AggregatedData } from '../aggregator/index.js';
 import { CascadePredictor, type CascadeRisk } from '../predictor/index.js';
@@ -24,12 +23,17 @@ import { exchangeAuth, filterByPlan } from '../middleware/exchangeAuth.js';
 import { applySecurity, bodySanitizer, getSecurityStats, getRecentAuditLog, unblockIp } from '../middleware/security.js';
 import { applyAdvancedSecurity, hashPassword, verifyPassword } from '../middleware/advancedSecurity.js';
 import { pythOracle } from '../oracle/index.js';
+import { logger as rootLogger } from '../lib/logger.js';
+import { DataValidator } from '../middleware/validation.js';
+import { ExchangeMetrics, buildHealthStatus } from '../observability/index.js';
 import adminRoutes from './routes/admin.js';
 import webhookRoutes from './routes/webhooks.js';
 import accountRoutes from './routes/account.js';
 import authRoutes from './routes/auth.js';
 import stockRoutes from './routes/stocks.js';
 import newsRoutes from './routes/news.js';
+
+const log = rootLogger.child({ component: 'api-server' });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,8 +52,8 @@ const SYMBOLS = [
   'PEPE', 'WIF', 'BONK', 'FET', 'RENDER'
 ];
 
-// Initialize clients and services - 13 exchanges total
-const clients = [
+// Initialize clients and services - 11 exchanges total
+const clients: BaseExchangeClient[] = [
   // Centralized Exchanges (CEX) - 8
   new BinanceClient(),
   new BybitClient(),
@@ -59,22 +63,23 @@ const clients = [
   new MEXCClient(),
   new KuCoinClient(),
   new KrakenClient(),
-  // Decentralized Exchanges (DEX) - 5
+  // Decentralized Exchanges (DEX) - 3
   new DYDXClient(),
   new HyperliquidClient(),
   new GMXClient(),
-  new JupiterClient(),
-  new FlashClient(),
 ];
 
 const aggregator = new DataAggregator(clients);
 const predictor = new CascadePredictor();
 const db = new PrismDB();
+const validator = new DataValidator();
+const exchangeMetrics = new ExchangeMetrics();
 
 // Cache for data
 let cachedData: AggregatedData | null = null;
 let cachedRisks: CascadeRisk[] = [];
 let lastFetch = 0;
+let lastRiskComputeAt = 0;
 const CACHE_TTL_MS = 30_000;
 const POLL_INTERVAL_MS = 30_000;
 
@@ -88,13 +93,27 @@ async function refreshData(broadcast = false): Promise<void> {
   }
 
   try {
-    cachedData = await aggregator.run(SYMBOLS);
+    // Phase 5: Validate exchange data before aggregation
+    const rawData = await aggregator.fetchAll(SYMBOLS);
+    const validatedData = validator.validateBatch(rawData);
+    cachedData = await aggregator.aggregate(validatedData, SYMBOLS);
     cachedRisks = predictor.analyze(cachedData);
-    lastFetch = now;
+    lastFetch = Date.now();
+    lastRiskComputeAt = Date.now();
+
+    // Phase 8: Record per-exchange metrics from health data
+    for (const client of clients) {
+      const health = client.getHealth();
+      if (health.consecutiveFailures === 0 && health.lastLatencyMs > 0) {
+        exchangeMetrics.recordSuccess(health.exchange, health.lastLatencyMs);
+      } else if (health.consecutiveFailures > 0) {
+        exchangeMetrics.recordError(health.exchange, `${health.consecutiveFailures} consecutive failures`);
+      }
+    }
 
     // Persist to database
-    db.saveSnapshot(cachedData);
-    db.saveRiskScores(cachedRisks);
+    await db.saveSnapshot(cachedData);
+    await db.saveRiskScores(cachedRisks);
 
     // Broadcast via WebSocket
     if (broadcast && wsServer) {
@@ -102,19 +121,25 @@ async function refreshData(broadcast = false): Promise<void> {
       wsServer.broadcastRisk(cachedRisks);
 
       // Dispatch webhooks
-      webhookManager.dispatchData(cachedData).catch(console.error);
-      webhookManager.dispatchRisk(cachedRisks).catch(console.error);
+      webhookManager.dispatchData(cachedData).catch((err: Error) => {
+        log.error({ err: err.message }, 'Webhook data dispatch failed');
+      });
+      webhookManager.dispatchRisk(cachedRisks).catch((err: Error) => {
+        log.error({ err: err.message }, 'Webhook risk dispatch failed');
+      });
 
       // Check for alerts
       const alertRisks = cachedRisks.filter(r =>
         r.riskLevel === 'critical' || r.riskLevel === 'high'
       );
       if (alertRisks.length > 0) {
-        webhookManager.dispatchAlert(alertRisks).catch(console.error);
+        webhookManager.dispatchAlert(alertRisks).catch((err: Error) => {
+          log.error({ err: err.message }, 'Webhook alert dispatch failed');
+        });
       }
     }
   } catch (error) {
-    console.error('Error refreshing data:', error);
+    log.error({ err: (error as Error).message }, 'Error refreshing data');
     throw error;
   }
 }
@@ -165,23 +190,26 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 // Request logging
 app.use((req: Request, res: Response, next: NextFunction) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
+  log.info({ method: req.method, path: req.path }, 'Incoming request');
   next();
 });
 
 // Routes
 
-// Health check
-app.get('/api/v1/health', (req: Request, res: Response) => {
-  const stats = db.getStats();
+// Health check — enhanced with Phase 8 observability
+app.get('/api/v1/health', async (req: Request, res: Response) => {
+  const stats = await db.getStats();
+  const health = buildHealthStatus(
+    clients,
+    wsServer?.getClientCount() || 0,
+    lastRiskComputeAt,
+    SYMBOLS.length,
+    exchangeMetrics,
+  );
+
   res.json({
-    status: 'ok',
-    timestamp: Date.now(),
-    exchanges: clients.map(c => c.name),
+    ...health,
     symbols: SYMBOLS,
-    websocket: {
-      clients: wsServer?.getClientCount() || 0,
-    },
     database: {
       snapshotCount: stats.snapshotCount,
       alertCount: stats.alertCount,
@@ -439,7 +467,7 @@ function safeParseInt(value: unknown, defaultVal: number, min = 1, max = 10000):
   return Math.min(Math.max(parsed, min), max);
 }
 
-app.get('/api/v1/history/:symbol', (req: Request, res: Response) => {
+app.get('/api/v1/history/:symbol', async (req: Request, res: Response) => {
   const symbol = (Array.isArray(req.params.symbol) ? req.params.symbol[0] : req.params.symbol)?.toUpperCase();
   const hours = safeParseInt(req.query.hours, 24, 1, 720); // Max 30 days
 
@@ -452,7 +480,7 @@ app.get('/api/v1/history/:symbol', (req: Request, res: Response) => {
   }
 
   try {
-    const history = db.getAggregatedHistory(symbol, hours);
+    const history = await db.getAggregatedHistory(symbol, hours);
     res.json({
       success: true,
       symbol,
@@ -468,7 +496,7 @@ app.get('/api/v1/history/:symbol', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/v1/history/:symbol/risk', (req: Request, res: Response) => {
+app.get('/api/v1/history/:symbol/risk', async (req: Request, res: Response) => {
   const symbol = (Array.isArray(req.params.symbol) ? req.params.symbol[0] : req.params.symbol)?.toUpperCase();
   const hours = safeParseInt(req.query.hours, 24, 1, 720);
 
@@ -481,7 +509,7 @@ app.get('/api/v1/history/:symbol/risk', (req: Request, res: Response) => {
   }
 
   try {
-    const history = db.getRiskHistory(symbol, hours);
+    const history = await db.getRiskHistory(symbol, hours);
     res.json({
       success: true,
       symbol,
@@ -497,11 +525,11 @@ app.get('/api/v1/history/:symbol/risk', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/v1/history/high-risk', (req: Request, res: Response) => {
+app.get('/api/v1/history/high-risk', async (req: Request, res: Response) => {
   const minScore = safeParseInt(req.query.minScore, 60, 0, 100);
 
   try {
-    const periods = db.getHighRiskPeriods(minScore);
+    const periods = await db.getHighRiskPeriods(minScore);
     res.json({
       success: true,
       minScore,
@@ -516,12 +544,12 @@ app.get('/api/v1/history/high-risk', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/v1/history/alerts', (req: Request, res: Response) => {
+app.get('/api/v1/history/alerts', async (req: Request, res: Response) => {
   const hours = safeParseInt(req.query.hours, 24, 1, 720);
   const severity = req.query.severity as string | undefined;
 
   try {
-    const alerts = db.getAlerts(hours, severity);
+    const alerts = await db.getAlerts(hours, severity);
     res.json({
       success: true,
       hours,
@@ -537,9 +565,9 @@ app.get('/api/v1/history/alerts', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/v1/stats', (req: Request, res: Response) => {
+app.get('/api/v1/stats', async (req: Request, res: Response) => {
   try {
-    const stats = db.getStats();
+    const stats = await db.getStats();
     res.json({
       success: true,
       stats: {
@@ -562,9 +590,7 @@ import crypto from 'crypto';
 // SECURITY: Generate secure random secret if not provided
 const ADMIN_SECRET = process.env.ADMIN_SECRET || (() => {
   const generatedSecret = crypto.randomBytes(32).toString('hex');
-  console.warn('[SECURITY WARNING] No ADMIN_SECRET env var set. Using generated secret:');
-  console.warn(`ADMIN_SECRET=${generatedSecret}`);
-  console.warn('Set this in your environment for production!');
+  log.warn({ generatedSecret }, 'No ADMIN_SECRET env var set — using generated secret. Set ADMIN_SECRET in production.');
   return generatedSecret;
 })();
 
@@ -716,84 +742,84 @@ app.get('/api/v1/client/symbols/:symbol', exchangeAuth({ checkSymbol: true }), a
   }
 });
 
+// ---------------------------------------------------------------------------
+// Controlled async polling loop — replaces setInterval
+// ---------------------------------------------------------------------------
+
+const POLL_MAX_DURATION_MS = 120_000; // 2 minute warning threshold
+let pollRunning = false;
+let pollShutdown = false;
+
+async function pollLoop(): Promise<void> {
+  while (!pollShutdown) {
+    if (pollRunning) {
+      log.warn('pollLoop re-entered while already running — skipping');
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
+
+    pollRunning = true;
+    const t0 = Date.now();
+
+    try {
+      await refreshData(true);
+      const durationMs = Date.now() - t0;
+
+      if (durationMs > POLL_MAX_DURATION_MS) {
+        log.warn({ durationMs, thresholdMs: POLL_MAX_DURATION_MS }, 'Poll cycle exceeded max duration');
+      }
+
+      log.info({ durationMs, wsClients: wsServer?.getClientCount() }, 'Poll cycle complete');
+    } catch (error) {
+      log.error({ err: (error as Error).message, durationMs: Date.now() - t0 }, 'Poll cycle failed');
+    } finally {
+      pollRunning = false;
+    }
+
+    // Wait remaining interval time (or start immediately if cycle took longer)
+    const elapsed = Date.now() - t0;
+    const delay = Math.max(0, POLL_INTERVAL_MS - elapsed);
+    if (delay > 0 && !pollShutdown) {
+      await sleep(delay);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Start server with WebSocket support
-export function startServer(): void {
+export async function startServer(): Promise<void> {
+  // Bootstrap database schema before accepting connections
+  await db.ensureSchema();
+
   const server = createServer(app);
 
   // Initialize WebSocket
   wsServer = new PrismWebSocket(server);
 
-  // Start background polling
-  setInterval(async () => {
-    try {
-      await refreshData(true); // broadcast = true
-      console.log(`[Poll] Data refreshed. WS clients: ${wsServer?.getClientCount()}`);
-    } catch (error) {
-      console.error('[Poll] Error:', error);
-    }
-  }, POLL_INTERVAL_MS);
-
   server.listen(PORT, () => {
-    console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                    PRISM API Server                          ║
-╚══════════════════════════════════════════════════════════════╝
-
-  HTTP Server: http://localhost:${PORT}
-  WebSocket:   ws://localhost:${PORT}/ws
-
-  Public Endpoints:
-    GET /api/v1/health          - Health check
-    GET /api/v1/data            - All exchange data
-    GET /api/v1/risk            - Cascade risk analysis
-    GET /api/v1/symbols         - List supported symbols
-    GET /api/v1/symbols/:s      - Data for specific symbol
-    GET /api/v1/exchanges       - List of exchanges
-    GET /api/v1/alerts          - Active risk alerts
-
-  Historical Endpoints:
-    GET /api/v1/history/:s      - Historical data
-    GET /api/v1/history/:s/risk - Risk score history
-    GET /api/v1/history/high-risk - High risk periods
-    GET /api/v1/history/alerts  - Historical alerts
-    GET /api/v1/stats           - Database statistics
-
-  Client Endpoints (API Key Required):
-    GET  /api/v1/client/data        - Data filtered by plan
-    GET  /api/v1/client/risk        - Risk filtered by plan
-    GET  /api/v1/client/symbols/:s  - Symbol data (plan check)
-    GET  /api/v1/account            - Account info
-    POST /api/v1/account/rotate-key - Rotate API key
-    GET  /api/v1/webhooks           - List webhooks
-    POST /api/v1/webhooks           - Register webhook
-    POST /api/v1/webhooks/:id/test  - Test webhook
-
-  Admin Endpoints (X-Admin-Secret Required):
-    POST   /api/v1/admin/exchanges         - Create exchange
-    GET    /api/v1/admin/exchanges         - List exchanges
-    PATCH  /api/v1/admin/exchanges/:id     - Update exchange
-    POST   /api/v1/admin/exchanges/:id/suspend    - Suspend
-    POST   /api/v1/admin/exchanges/:id/reactivate - Reactivate
-    DELETE /api/v1/admin/exchanges/:id     - Delete exchange
-
-  WebSocket Events:
-    → connected, data, risk, alert, ping/pong
-
-  Exchanges: ${clients.map(c => c.name).join(', ')}
-  Symbols: ${SYMBOLS.join(', ')}
-  Poll Interval: ${POLL_INTERVAL_MS / 1000}s
-`);
+    log.info({
+      port: PORT,
+      exchanges: clients.map(c => c.name),
+      symbolCount: SYMBOLS.length,
+      pollIntervalSec: POLL_INTERVAL_MS / 1000,
+    }, 'PRISM API Server started');
   });
 
-  // Initial data fetch
-  refreshData(true).catch(console.error);
+  // Start controlled polling loop (non-blocking)
+  pollLoop().catch((err: Error) => {
+    log.fatal({ err: err.message }, 'Poll loop crashed unexpectedly');
+  });
 }
 
 // Handle shutdown
 process.on('SIGINT', () => {
-  console.log('\nShutting down...');
+  log.info('Shutting down PRISM API Server');
+  pollShutdown = true;
   wsServer?.close();
-  db.close();
+  db.close().catch(() => {});
   process.exit(0);
 });
 

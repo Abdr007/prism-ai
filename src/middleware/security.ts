@@ -1,5 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'security' });
 
 // ============ Security Configuration ============
 
@@ -315,7 +318,7 @@ function recordViolation(ip: string, reason: string): void {
   // Block if too many violations
   if (violation.count >= SECURITY_CONFIG.maxViolations) {
     violation.blockedUntil = now + SECURITY_CONFIG.blockDuration;
-    console.warn(`[SECURITY] IP ${ip} blocked for ${SECURITY_CONFIG.blockDuration / 1000}s: ${reason}`);
+    log.warn({ ip, blockDurationS: SECURITY_CONFIG.blockDuration / 1000, reason }, 'IP blocked');
   }
 }
 
@@ -361,7 +364,7 @@ export function auditLogger(req: Request, res: Response, next: NextFunction): vo
 
     // Log suspicious responses
     if (res.statusCode >= 400) {
-      console.log(`[AUDIT] ${entry.ip} ${entry.method} ${entry.path} -> ${entry.statusCode} (${entry.responseTime}ms)`);
+      log.info({ ip: entry.ip, method: entry.method, path: entry.path, statusCode: entry.statusCode, responseTimeMs: entry.responseTime }, 'Audit log entry');
     }
 
     // Trim old entries

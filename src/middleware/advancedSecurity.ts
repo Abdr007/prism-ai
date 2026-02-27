@@ -1,5 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'advanced-security' });
 
 // ============ Advanced Security Configuration ============
 
@@ -203,7 +206,7 @@ export function recordFailedAttempt(ip: string): void {
   // Lock if too many attempts
   if (attempts.count >= ADVANCED_SECURITY_CONFIG.maxLoginAttempts) {
     attempts.lockedUntil = now + ADVANCED_SECURITY_CONFIG.lockoutDuration;
-    console.warn(`[SECURITY] IP ${ip} locked out after ${attempts.count} failed attempts`);
+    log.warn({ ip, attempts: attempts.count }, 'IP locked out after failed attempts');
   }
 }
 
@@ -238,7 +241,7 @@ export function fingerprintTracking(req: Request, res: Response, next: NextFunct
 
     if (storedFingerprint && storedFingerprint !== fingerprint) {
       // Fingerprint changed - could be suspicious
-      console.warn(`[SECURITY] Fingerprint changed for API key ending in ...${apiKey.slice(-4)}`);
+      log.warn({ apiKeySuffix: apiKey.slice(-4) }, 'Client fingerprint changed');
       // You could add additional verification here
     }
 
@@ -266,7 +269,7 @@ export function sqlInjectionProtection(req: Request, res: Response, next: NextFu
     if (typeof value === 'string') {
       for (const pattern of SQL_INJECTION_PATTERNS) {
         if (pattern.test(value)) {
-          console.warn(`[SECURITY] SQL injection attempt detected at ${path}: ${value.substring(0, 50)}`);
+          log.warn({ path, snippet: value.substring(0, 50) }, 'SQL injection attempt detected');
           return true;
         }
       }
@@ -329,7 +332,7 @@ export function xssProtection(req: Request, res: Response, next: NextFunction): 
     if (typeof value === 'string') {
       for (const pattern of XSS_PATTERNS) {
         if (pattern.test(value)) {
-          console.warn(`[SECURITY] XSS attempt detected at ${path}`);
+          log.warn({ path }, 'XSS attempt detected');
           return true;
         }
       }
@@ -376,7 +379,7 @@ export function pathTraversalProtection(req: Request, res: Response, next: NextF
   };
 
   if (checkPath(req.path) || checkPath(req.url)) {
-    console.warn(`[SECURITY] Path traversal attempt: ${req.path}`);
+    log.warn({ path: req.path }, 'Path traversal attempt');
     res.status(400).json({
       success: false,
       error: 'Invalid path',

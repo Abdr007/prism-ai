@@ -1,5 +1,46 @@
 import type { ExchangeClient, ExchangeData } from '../exchanges/types.js';
 import { pythOracle, type PythPrice } from '../oracle/index.js';
+import { logger as rootLogger } from '../lib/logger.js';
+
+const log = rootLogger.child({ component: 'aggregator' });
+
+// ---------------------------------------------------------------------------
+// Semaphore — limits concurrent async operations
+// ---------------------------------------------------------------------------
+
+class Semaphore {
+  private permits: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(permits: number) {
+    if (permits < 1) throw new Error('Semaphore permits must be >= 1');
+    this.permits = permits;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.permits > 0) {
+      this.permits--;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) {
+      // Hand permit directly to next waiter (no increment)
+      next();
+    } else {
+      this.permits++;
+    }
+  }
+
+  get pending(): number {
+    return this.waiters.length;
+  }
+}
 
 // Data validation thresholds to filter out obviously bad exchange data
 const VALIDATION = {
@@ -60,21 +101,54 @@ export interface RiskSignal {
   data: Record<string, unknown>;
 }
 
+/** Default max exchanges fetched in parallel. */
+const DEFAULT_EXCHANGE_CONCURRENCY = 3;
+
 export class DataAggregator {
   private clients: ExchangeClient[];
+  private readonly semaphore: Semaphore;
 
-  constructor(clients: ExchangeClient[]) {
+  constructor(clients: ExchangeClient[], concurrency: number = DEFAULT_EXCHANGE_CONCURRENCY) {
     this.clients = clients;
+    this.semaphore = new Semaphore(concurrency);
   }
 
   async fetchAll(symbols: string[]): Promise<ExchangeData[]> {
-    const results = await Promise.allSettled(
-      this.clients.map(client => client.getAllData(symbols))
-    );
+    const results: ExchangeData[] = [];
 
-    return results
-      .filter((r): r is PromiseFulfilledResult<ExchangeData> => r.status === 'fulfilled')
-      .map(r => r.value);
+    // Launch all tasks — the semaphore gates actual execution to `concurrency` at a time.
+    // Each task acquires a permit before calling getAllData and releases it when done,
+    // so at most `concurrency` exchanges hit their APIs simultaneously.
+    const tasks = this.clients.map(async (client): Promise<ExchangeData | null> => {
+      await this.semaphore.acquire();
+      const t0 = Date.now();
+      try {
+        const data = await client.getAllData(symbols);
+        log.debug(
+          { exchange: client.name, durationMs: Date.now() - t0, pending: this.semaphore.pending },
+          'Exchange fetch complete',
+        );
+        return data;
+      } catch (err) {
+        log.warn(
+          { exchange: client.name, err: (err as Error).message, durationMs: Date.now() - t0 },
+          'Exchange fetch failed',
+        );
+        return null;
+      } finally {
+        this.semaphore.release();
+      }
+    });
+
+    const settled = await Promise.all(tasks);
+
+    for (const data of settled) {
+      if (data !== null) {
+        results.push(data);
+      }
+    }
+
+    return results;
   }
 
   async aggregate(exchangeData: ExchangeData[], symbols: string[]): Promise<AggregatedData> {

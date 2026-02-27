@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import { logger as rootLogger } from '../../lib/logger.js';
+
+const log = rootLogger.child({ component: 'news-routes' });
 
 const router = Router();
 
@@ -67,7 +70,7 @@ async function fetchNews(): Promise<NewsArticle[]> {
     }
 
   } catch (error) {
-    console.error('[News] Failed to fetch:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Failed to fetch news');
     articles.push(...generateFallbackNews());
   }
 
@@ -179,16 +182,16 @@ function generateFallbackNews(): NewsArticle[] {
 // Refresh news data
 async function refreshNews(): Promise<void> {
   try {
-    console.log('[News] Refreshing news data...');
+    log.info('Refreshing news data');
     const articles = await fetchNews();
 
     newsCache = {
       articles,
       timestamp: Date.now(),
     };
-    console.log(`[News] Refreshed ${articles.length} articles`);
+    log.info({ count: articles.length }, 'News data refreshed');
   } catch (error) {
-    console.error('[News] Failed to refresh:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'Failed to refresh news');
   }
 }
 
@@ -224,7 +227,7 @@ router.get('/', async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    console.error('[News] Error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'News endpoint error');
     res.status(500).json({ success: false, error: 'Failed to fetch news' });
   }
 });
@@ -239,7 +242,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
       count: newsCache.articles.length,
     });
   } catch (error) {
-    console.error('[News] Refresh error:', error);
+    log.error({ err: error instanceof Error ? error.message : error }, 'News refresh endpoint error');
     res.status(500).json({ success: false, error: 'Failed to refresh news' });
   }
 });

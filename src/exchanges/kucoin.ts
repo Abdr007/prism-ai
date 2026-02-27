@@ -1,115 +1,153 @@
-import axios from 'axios';
-import type { ExchangeClient, OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
+import { BaseExchangeClient } from './base.js';
+import type { OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
 
 const BASE_URL = 'https://api-futures.kucoin.com';
 
-// KuCoin uses format: XBTUSDTM for BTC, ETHUSDTM for others
 function toExchangeSymbol(symbol: string): string {
   if (symbol === 'BTC') return 'XBTUSDTM';
   return `${symbol}USDTM`;
 }
 
-export class KuCoinClient implements ExchangeClient {
-  name = 'kucoin';
+interface KuCoinResponse<T> {
+  data: T;
+}
+
+export class KuCoinClient extends BaseExchangeClient {
+  readonly name = 'kucoin';
+
+  constructor() {
+    super(BASE_URL);
+  }
 
   async getOpenInterest(symbol: string): Promise<OpenInterest> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/openInterest`, {
-        params: { symbol: exchangeSymbol }
-      });
+    const [oiRes, tickerRes] = await Promise.all([
+      this.request<KuCoinResponse<{ openInterest: string }>>('GET', '/api/v1/openInterest', {
+        params: { symbol: exchangeSymbol },
+      }),
+      this.request<KuCoinResponse<{ price: string }>>('GET', '/api/v1/ticker', {
+        params: { symbol: exchangeSymbol },
+      }),
+    ]);
 
-      const data = response.data.data;
-      const oi = parseFloat(data?.openInterest || '0');
+    const oi = this.toNonNegative(oiRes.data?.openInterest, 'openInterest');
+    const price = this.toNonNegative(tickerRes.data?.price, 'price');
 
-      // Get price
-      const tickerRes = await axios.get(`${BASE_URL}/api/v1/ticker`, {
-        params: { symbol: exchangeSymbol }
-      });
-      const price = parseFloat(tickerRes.data.data?.price || '0');
-
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: oi,
-        openInterestValue: oi * price,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: 0,
-        openInterestValue: 0,
-        timestamp: Date.now(),
-      };
-    }
+    return {
+      exchange: this.name,
+      symbol,
+      openInterest: oi,
+      openInterestValue: oi * price,
+      timestamp: this.now(),
+    };
   }
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/funding-rate/${exchangeSymbol}/current`);
-      const data = response.data.data;
+    const res = await this.request<KuCoinResponse<{
+      value: string;
+      timePoint: number;
+    }>>('GET', `/api/v1/funding-rate/${exchangeSymbol}/current`);
 
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate: parseFloat(data?.value || '0'),
-        fundingTime: data?.timePoint || Date.now(),
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate: 0,
-        fundingTime: Date.now(),
-        timestamp: Date.now(),
-      };
-    }
+    const fundingRate = this.toFiniteNumber(res.data?.value, 'value');
+
+    return {
+      exchange: this.name,
+      symbol,
+      fundingRate,
+      fundingTime: res.data?.timePoint || this.now(),
+      timestamp: this.now(),
+    };
   }
 
   async getMarkPrice(symbol: string): Promise<MarkPrice> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/mark-price/${exchangeSymbol}/current`);
-      const data = response.data.data;
+    const res = await this.request<KuCoinResponse<{
+      value: string;
+      indexPrice: string;
+    }>>('GET', `/api/v1/mark-price/${exchangeSymbol}/current`);
 
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: parseFloat(data?.value || '0'),
-        indexPrice: parseFloat(data?.indexPrice || '0'),
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: 0,
-        indexPrice: 0,
-        timestamp: Date.now(),
-      };
-    }
-  }
+    const markPrice = this.toNonNegative(res.data?.value, 'value');
+    const indexPrice = this.toNonNegative(res.data?.indexPrice, 'indexPrice');
 
-  async getAllData(symbols: string[]): Promise<ExchangeData> {
-    const [openInterest, fundingRates, markPrices] = await Promise.all([
-      Promise.all(symbols.map(s => this.getOpenInterest(s))),
-      Promise.all(symbols.map(s => this.getFundingRate(s))),
-      Promise.all(symbols.map(s => this.getMarkPrice(s))),
-    ]);
+    this.assertPriceDeviation(markPrice, indexPrice, symbol);
 
     return {
       exchange: this.name,
-      openInterest,
-      fundingRates,
-      markPrices,
-      timestamp: Date.now(),
+      symbol,
+      markPrice,
+      indexPrice,
+      timestamp: this.now(),
     };
+  }
+
+  /**
+   * Batch-optimized: 3 calls per symbol (dropped separate /ticker).
+   * Uses mark price for OI value instead of fetching /ticker separately.
+   * Down from 4 calls/symbol to 3 calls/symbol.
+   */
+  async getAllData(symbols: string[]): Promise<ExchangeData> {
+    const openInterest: OpenInterest[] = [];
+    const fundingRates: FundingRate[] = [];
+    const markPrices: MarkPrice[] = [];
+    const now = this.now();
+
+    const results = await Promise.all(
+      symbols.map(async (symbol) => {
+        const exchangeSymbol = toExchangeSymbol(symbol);
+        try {
+          const [oiRes, fundingRes, markRes] = await Promise.all([
+            this.request<KuCoinResponse<{ openInterest: string }>>('GET', '/api/v1/openInterest', {
+              params: { symbol: exchangeSymbol },
+            }),
+            this.request<KuCoinResponse<{ value: string; timePoint: number }>>('GET', `/api/v1/funding-rate/${exchangeSymbol}/current`),
+            this.request<KuCoinResponse<{ value: string; indexPrice: string }>>('GET', `/api/v1/mark-price/${exchangeSymbol}/current`),
+          ]);
+          return { symbol, oiRes, fundingRes, markRes };
+        } catch (err) {
+          this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData fetch failed');
+          return null;
+        }
+      }),
+    );
+
+    for (const result of results) {
+      if (!result) continue;
+      const { symbol, oiRes, fundingRes, markRes } = result;
+      try {
+        const oi = this.toNonNegative(oiRes.data?.openInterest, 'openInterest');
+        const markPrice = this.toNonNegative(markRes.data?.value, 'value');
+        const indexPrice = this.toNonNegative(markRes.data?.indexPrice, 'indexPrice');
+        const fundingRate = this.toFiniteNumber(fundingRes.data?.value, 'value');
+
+        this.assertPriceDeviation(markPrice, indexPrice, symbol);
+
+        openInterest.push({
+          exchange: this.name, symbol,
+          openInterest: oi,
+          openInterestValue: oi * markPrice,
+          timestamp: now,
+        });
+        fundingRates.push({
+          exchange: this.name, symbol,
+          fundingRate,
+          fundingTime: fundingRes.data?.timePoint || now,
+          timestamp: now,
+        });
+        markPrices.push({
+          exchange: this.name, symbol,
+          markPrice,
+          indexPrice,
+          timestamp: now,
+        });
+      } catch (err) {
+        this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData parse failed');
+      }
+    }
+
+    return { exchange: this.name, openInterest, fundingRates, markPrices, timestamp: now };
   }
 }

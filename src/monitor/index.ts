@@ -3,12 +3,13 @@ import type { ExchangeClient } from '../exchanges/types.js';
 import { DataAggregator, type AggregatedData, type RiskSignal } from '../aggregator/index.js';
 import { CascadePredictor, type CascadeRisk } from '../predictor/index.js';
 import { PrismDB } from '../db/index.js';
+import { DataValidator } from '../middleware/validation.js';
 
 export interface MonitorConfig {
   symbols: string[];
   intervalMs: number;  // Polling interval in milliseconds
   persistData?: boolean; // Whether to save to database
-  dbPath?: string;       // Custom database path
+  databaseUrl?: string;  // PostgreSQL connection URL
 }
 
 export interface MonitorEvents {
@@ -21,6 +22,7 @@ export interface MonitorEvents {
 export class PrismMonitor extends EventEmitter {
   private aggregator: DataAggregator;
   private predictor: CascadePredictor;
+  private validator: DataValidator;
   private db: PrismDB | null = null;
   private config: MonitorConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -32,16 +34,22 @@ export class PrismMonitor extends EventEmitter {
     super();
     this.aggregator = new DataAggregator(clients);
     this.predictor = new CascadePredictor();
+    this.validator = new DataValidator();
     this.config = config;
 
     if (config.persistData) {
-      this.db = new PrismDB(config.dbPath);
+      this.db = new PrismDB(config.databaseUrl);
     }
   }
 
   async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
+
+    // Bootstrap database schema
+    if (this.db) {
+      await this.db.ensureSchema();
+    }
 
     // Fetch immediately on start
     await this.tick();
@@ -54,7 +62,7 @@ export class PrismMonitor extends EventEmitter {
     }, this.config.intervalMs);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -62,28 +70,31 @@ export class PrismMonitor extends EventEmitter {
     this.isRunning = false;
 
     if (this.db) {
-      this.db.close();
+      await this.db.close();
     }
   }
 
   private async tick(): Promise<void> {
     try {
-      const data = await this.aggregator.run(this.config.symbols);
+      // Fetch → Validate → Aggregate → Risk (no bypass)
+      const rawData = await this.aggregator.fetchAll(this.config.symbols);
+      const validatedData = this.validator.validateBatch(rawData);
+      const data = await this.aggregator.aggregate(validatedData, this.config.symbols);
       this.lastData = data;
 
-      // Analyze cascade risk
+      // Analyze cascade risk (only validated data reaches here)
       const risks = this.predictor.analyze(data);
       this.lastRisks = risks;
 
       // Persist to database
       if (this.db) {
-        this.db.saveSnapshot(data);
-        this.db.saveRiskScores(risks);
+        await this.db.saveSnapshot(data);
+        await this.db.saveRiskScores(risks);
 
         // Save high-priority alerts
         for (const risk of risks) {
           if (risk.riskLevel === 'critical' || risk.riskLevel === 'high') {
-            this.db.saveAlert(
+            await this.db.saveAlert(
               risk.timestamp,
               risk.symbol,
               'CASCADE_RISK',

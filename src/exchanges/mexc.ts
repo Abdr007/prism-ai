@@ -1,114 +1,139 @@
-import axios from 'axios';
-import type { ExchangeClient, OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
+import { BaseExchangeClient } from './base.js';
+import type { OpenInterest, FundingRate, MarkPrice, ExchangeData } from './types.js';
 
 const BASE_URL = 'https://contract.mexc.com';
 
-// MEXC uses format: BTC_USDT
 function toExchangeSymbol(symbol: string): string {
   return `${symbol}_USDT`;
 }
 
-export class MEXCClient implements ExchangeClient {
-  name = 'mexc';
+interface MEXCResponse<T> {
+  data: T;
+}
+
+export class MEXCClient extends BaseExchangeClient {
+  readonly name = 'mexc';
+
+  constructor() {
+    super(BASE_URL);
+  }
 
   async getOpenInterest(symbol: string): Promise<OpenInterest> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/contract/open_interest/${exchangeSymbol}`);
-      const data = response.data.data;
+    const [oiRes, tickerRes] = await Promise.all([
+      this.request<MEXCResponse<{ value: string }>>('GET', `/api/v1/contract/open_interest/${exchangeSymbol}`),
+      this.request<MEXCResponse<{ lastPrice: string }>>('GET', '/api/v1/contract/ticker', {
+        params: { symbol: exchangeSymbol },
+      }),
+    ]);
 
-      const oi = parseFloat(data?.value || '0');
+    const oiValue = this.toNonNegative(oiRes.data?.value, 'value');
+    const price = this.toNonNegative(tickerRes.data?.lastPrice, 'lastPrice');
 
-      // Get price
-      const tickerRes = await axios.get(`${BASE_URL}/api/v1/contract/ticker`, {
-        params: { symbol: exchangeSymbol }
-      });
-      const price = parseFloat(tickerRes.data.data?.lastPrice || '0');
-
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: oi / price, // MEXC returns value, convert to quantity
-        openInterestValue: oi,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        openInterest: 0,
-        openInterestValue: 0,
-        timestamp: Date.now(),
-      };
-    }
+    return {
+      exchange: this.name,
+      symbol,
+      openInterest: price > 0 ? oiValue / price : 0, // MEXC returns USD value
+      openInterestValue: oiValue,
+      timestamp: this.now(),
+    };
   }
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/contract/funding_rate/${exchangeSymbol}`);
-      const data = response.data.data;
+    const res = await this.request<MEXCResponse<{
+      fundingRate: string;
+      nextSettleTime: number;
+    }>>('GET', `/api/v1/contract/funding_rate/${exchangeSymbol}`);
 
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate: parseFloat(data?.fundingRate || '0'),
-        fundingTime: data?.nextSettleTime || Date.now(),
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        fundingRate: 0,
-        fundingTime: Date.now(),
-        timestamp: Date.now(),
-      };
-    }
+    const fundingRate = this.toFiniteNumber(res.data?.fundingRate, 'fundingRate');
+
+    return {
+      exchange: this.name,
+      symbol,
+      fundingRate,
+      fundingTime: res.data?.nextSettleTime || this.now(),
+      timestamp: this.now(),
+    };
   }
 
   async getMarkPrice(symbol: string): Promise<MarkPrice> {
     const exchangeSymbol = toExchangeSymbol(symbol);
 
-    try {
-      const response = await axios.get(`${BASE_URL}/api/v1/contract/index_price/${exchangeSymbol}`);
-      const data = response.data.data;
+    const res = await this.request<MEXCResponse<{ indexPrice: string }>>('GET', `/api/v1/contract/index_price/${exchangeSymbol}`);
 
-      const price = parseFloat(data?.indexPrice || '0');
-
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: price,
-        indexPrice: price,
-        timestamp: Date.now(),
-      };
-    } catch {
-      return {
-        exchange: this.name,
-        symbol,
-        markPrice: 0,
-        indexPrice: 0,
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  async getAllData(symbols: string[]): Promise<ExchangeData> {
-    const [openInterest, fundingRates, markPrices] = await Promise.all([
-      Promise.all(symbols.map(s => this.getOpenInterest(s))),
-      Promise.all(symbols.map(s => this.getFundingRate(s))),
-      Promise.all(symbols.map(s => this.getMarkPrice(s))),
-    ]);
+    const price = this.toNonNegative(res.data?.indexPrice, 'indexPrice');
 
     return {
       exchange: this.name,
-      openInterest,
-      fundingRates,
-      markPrices,
-      timestamp: Date.now(),
+      symbol,
+      markPrice: price,
+      indexPrice: price,
+      timestamp: this.now(),
     };
+  }
+
+  /**
+   * Batch-optimized: 3 calls per symbol (dropped separate /ticker).
+   * Uses index price for OI contract conversion instead of fetching /ticker separately.
+   * Down from 4 calls/symbol to 3 calls/symbol.
+   */
+  async getAllData(symbols: string[]): Promise<ExchangeData> {
+    const openInterest: OpenInterest[] = [];
+    const fundingRates: FundingRate[] = [];
+    const markPrices: MarkPrice[] = [];
+    const now = this.now();
+
+    const results = await Promise.all(
+      symbols.map(async (symbol) => {
+        const exchangeSymbol = toExchangeSymbol(symbol);
+        try {
+          const [oiRes, fundingRes, priceRes] = await Promise.all([
+            this.request<MEXCResponse<{ value: string }>>('GET', `/api/v1/contract/open_interest/${exchangeSymbol}`),
+            this.request<MEXCResponse<{ fundingRate: string; nextSettleTime: number }>>('GET', `/api/v1/contract/funding_rate/${exchangeSymbol}`),
+            this.request<MEXCResponse<{ indexPrice: string }>>('GET', `/api/v1/contract/index_price/${exchangeSymbol}`),
+          ]);
+          return { symbol, oiRes, fundingRes, priceRes };
+        } catch (err) {
+          this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData fetch failed');
+          return null;
+        }
+      }),
+    );
+
+    for (const result of results) {
+      if (!result) continue;
+      const { symbol, oiRes, fundingRes, priceRes } = result;
+      try {
+        const oiValue = this.toNonNegative(oiRes.data?.value, 'value');
+        const price = this.toNonNegative(priceRes.data?.indexPrice, 'indexPrice');
+        const fundingRate = this.toFiniteNumber(fundingRes.data?.fundingRate, 'fundingRate');
+
+        openInterest.push({
+          exchange: this.name, symbol,
+          openInterest: price > 0 ? oiValue / price : 0,
+          openInterestValue: oiValue,
+          timestamp: now,
+        });
+        fundingRates.push({
+          exchange: this.name, symbol,
+          fundingRate,
+          fundingTime: fundingRes.data?.nextSettleTime || now,
+          timestamp: now,
+        });
+        markPrices.push({
+          exchange: this.name, symbol,
+          markPrice: price,
+          indexPrice: price,
+          timestamp: now,
+        });
+      } catch (err) {
+        this.logger.warn({ symbol, err: (err as Error).message }, 'getAllData parse failed');
+      }
+    }
+
+    return { exchange: this.name, openInterest, fundingRates, markPrices, timestamp: now };
   }
 }
