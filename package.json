@@ -12,7 +12,10 @@
     "api": "tsx src/api/server.ts",
     "dashboard": "cd dashboard && npm run dev",
     "dashboard:build": "cd dashboard && npm run build",
-    "install:all": "npm install && cd dashboard && npm install"
+    "install:all": "npm install && cd dashboard && npm install",
+    "backfill": "tsx src/historical/backfill.ts",
+    "ingest": "tsx src/historical/ingest.ts",
+    "report": "tsx src/historical/report.ts"
   },
   "keywords": [
     "crypto",
