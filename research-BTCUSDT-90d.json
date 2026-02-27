@@ -1,0 +1,611 @@
+{
+  "trackA_volatilityModel": {
+    "cascadeStats": {
+      "definition1": {
+        "label": "|30m ret| >= 2%",
+        "count_minutes": 531,
+        "deduped_events": 58
+      },
+      "definition2": {
+        "label": "Top 1% 30m RV",
+        "threshold": 0.0021730087729363626,
+        "count_minutes": 1296
+      },
+      "definition3": {
+        "label": "|30m ret| >= 3σ×√30",
+        "count_minutes": 2756
+      },
+      "total_minutes": 129586,
+      "base_rate_def1": 0.0040976648712052225,
+      "base_rate_def1_hourly": 0.026854752828237616,
+      "monthly_distribution": {
+        "2025-12": 14,
+        "2026-01": 12,
+        "2026-02": 32
+      },
+      "clustering": {
+        "mean_gap_hours": 36.228070175438596,
+        "std_gap_hours": 64.88534325580439,
+        "cv": 1.7910240027025905
+      },
+      "events": [
+        {
+          "time": "2025-12-01 05:00:00+05:30",
+          "move_pct": "2.63",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-01 20:00:00+05:30",
+          "move_pct": "2.16",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-02 20:00:00+05:30",
+          "move_pct": "2.29",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-05 21:00:00+05:30",
+          "move_pct": "2.15",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-09 20:00:00+05:30",
+          "move_pct": "2.25",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-09 21:00:00+05:30",
+          "move_pct": "2.43",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-15 20:00:00+05:30",
+          "move_pct": "2.12",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-17 19:00:00+05:30",
+          "move_pct": "2.23",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-17 20:00:00+05:30",
+          "move_pct": "3.42",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-17 21:00:00+05:30",
+          "move_pct": "3.17",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-18 22:00:00+05:30",
+          "move_pct": "2.90",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2025-12-19 08:00:00+05:30",
+          "move_pct": "2.00",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-26 07:00:00+05:30",
+          "move_pct": "2.16",
+          "direction": "UP"
+        },
+        {
+          "time": "2025-12-26 20:00:00+05:30",
+          "move_pct": "2.33",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2026-01-09 20:00:00+05:30",
+          "move_pct": "2.21",
+          "direction": "UP"
+        },
+        {
+          "time": "2026-01-19 05:00:00+05:30",
+          "move_pct": "2.76",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2026-01-21 21:00:00+05:30",
+          "move_pct": "2.23",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2026-01-22 00:00:00+05:30",
+          "move_pct": "2.16",
+          "direction": "UP"
+        },
+        {
+          "time": "2026-01-29 20:00:00+05:30",
+          "move_pct": "2.92",
+          "direction": "DOWN"
+        },
+        {
+          "time": "2026-01-30 06:00:00+05:30",
+          "move_pct": "3.22",
+          "direction": "DOWN"
+        }
+      ]
+    },
+    "featureSchema": {
+      "total_rows": 129586,
+      "warmed_up_rows": 128145,
+      "features": {
+        "f1_ret_zscore": {
+          "mean": 0.02216119582325237,
+          "std": 1.0850910596264727,
+          "description": "z-score of |1-min return| vs 24h rolling"
+        },
+        "f2_rv30m": {
+          "mean": 0.0005873704065183409,
+          "std": 0.00042884235338538045,
+          "description": "30-min rolling realized volatility"
+        },
+        "f3_oi_zscore": {
+          "mean": 0,
+          "std": 0,
+          "description": "OI z-score vs 24h rolling (5-min granularity)"
+        },
+        "f4_funding_regime": {
+          "values": [
+            -1,
+            0,
+            1
+          ],
+          "description": "Funding regime: -1=negative, 0=neutral, +1=positive"
+        },
+        "f5_vol_tercile": {
+          "values": [
+            1,
+            2,
+            3
+          ],
+          "description": "Volatility tercile (low/med/high)"
+        }
+      },
+      "risk_score": {
+        "mean": 6.907667494945442,
+        "std": 15.581391228224442,
+        "p50": 0,
+        "p95": 39,
+        "p99": 81
+      }
+    },
+    "performance": {
+      "best_threshold": 45,
+      "best_f1": 0.026845637583892617,
+      "pr_curve": [
+        {
+          "threshold": 0,
+          "precision": 0.004143743415661945,
+          "recall": 1,
+          "f1": 0.008253287326307935,
+          "fpr": 1
+        },
+        {
+          "threshold": 5,
+          "precision": 0.007952174158253906,
+          "recall": 0.5310734463276836,
+          "f1": 0.015669713555413554,
+          "fpr": 0.2756750826711803
+        },
+        {
+          "threshold": 10,
+          "precision": 0.009131228802504566,
+          "recall": 0.4613935969868173,
+          "f1": 0.017908047657334992,
+          "fpr": 0.20833137430062532
+        },
+        {
+          "threshold": 15,
+          "precision": 0.00988026866543366,
+          "recall": 0.3822975517890772,
+          "f1": 0.019262703420790433,
+          "fpr": 0.15941040951619728
+        },
+        {
+          "threshold": 20,
+          "precision": 0.010760130883463379,
+          "recall": 0.3220338983050847,
+          "f1": 0.020824453510320893,
+          "fpr": 0.12319181281050669
+        },
+        {
+          "threshold": 25,
+          "precision": 0.011691662635058862,
+          "recall": 0.2730696798493409,
+          "f1": 0.02242325833140029,
+          "fpr": 0.09604745560831883
+        },
+        {
+          "threshold": 30,
+          "precision": 0.012373453318335208,
+          "recall": 0.2278719397363465,
+          "f1": 0.02347235693501455,
+          "fpr": 0.0756813515758459
+        },
+        {
+          "threshold": 35,
+          "precision": 0.013513513513513514,
+          "recall": 0.1977401129943503,
+          "f1": 0.02529815684857246,
+          "fpr": 0.06006394282758945
+        },
+        {
+          "threshold": 40,
+          "precision": 0.013273628658244043,
+          "recall": 0.15630885122410546,
+          "f1": 0.02446933962264151,
+          "fpr": 0.048348927233689096
+        },
+        {
+          "threshold": 45,
+          "precision": 0.014811927499512765,
+          "recall": 0.1431261770244821,
+          "f1": 0.026845637583892617,
+          "fpr": 0.03961164135596408
+        },
+        {
+          "threshold": 50,
+          "precision": 0.01509705248023005,
+          "recall": 0.11864406779661017,
+          "f1": 0.026785714285714288,
+          "fpr": 0.03220649771968593
+        },
+        {
+          "threshold": 55,
+          "precision": 0.015111111111111112,
+          "recall": 0.096045197740113,
+          "f1": 0.026113671274961597,
+          "fpr": 0.026047298885702196
+        },
+        {
+          "threshold": 60,
+          "precision": 0.014830508474576272,
+          "recall": 0.07909604519774012,
+          "f1": 0.024977698483496878,
+          "fpr": 0.021862805021392637
+        },
+        {
+          "threshold": 65,
+          "precision": 0.01621852326077678,
+          "recall": 0.07156308851224105,
+          "f1": 0.02644398051496173,
+          "fpr": 0.018062281567853056
+        },
+        {
+          "threshold": 70,
+          "precision": 0.015792154865002548,
+          "recall": 0.0583804143126177,
+          "f1": 0.024859663191659987,
+          "fpr": 0.015139404767501998
+        },
+        {
+          "threshold": 75,
+          "precision": 0.01704199634814364,
+          "recall": 0.05273069679849341,
+          "f1": 0.025758969641214352,
+          "fpr": 0.0126553512937452
+        },
+        {
+          "threshold": 80,
+          "precision": 0.016594516594516596,
+          "recall": 0.04331450094161959,
+          "f1": 0.023995826812728223,
+          "fpr": 0.010680646324071027
+        },
+        {
+          "threshold": 85,
+          "precision": 0.014321819713563605,
+          "recall": 0.032015065913371,
+          "f1": 0.01979045401629802,
+          "fpr": 0.009168273073487235
+        },
+        {
+          "threshold": 90,
+          "precision": 0.01693227091633466,
+          "recall": 0.032015065913371,
+          "f1": 0.02214983713355049,
+          "fpr": 0.007734261131223847
+        },
+        {
+          "threshold": 95,
+          "precision": 0.019473081328751432,
+          "recall": 0.032015065913371,
+          "f1": 0.024216524216524215,
+          "fpr": 0.006707727992226558
+        },
+        {
+          "threshold": 100,
+          "precision": 0.02069857697283312,
+          "recall": 0.030131826741996232,
+          "f1": 0.024539877300613498,
+          "fpr": 0.005931951039854561
+        }
+      ],
+      "auc_pr": 0.008805586746451365,
+      "lead_time": {
+        "avg_minutes": 13.085714285714285,
+        "median_minutes": 9
+      },
+      "baselines": {
+        "random_precision": 0.004098613726882584,
+        "always_negative_recall": 0,
+        "always_negative_f1": 0
+      }
+    },
+    "calibration": {
+      "fitted_params": {
+        "intercept": -5.778344736978529,
+        "coefficient": 0.02295307195771749
+      },
+      "brier_score": 0.0000049882468661900195,
+      "brier_skill_score": 0.5252954442288613,
+      "base_rate": 0.004143743415661945,
+      "reliability_curve": [
+        {
+          "bin": 77.5,
+          "predicted": 0.017995,
+          "observed": 0.019455,
+          "count": 257
+        },
+        {
+          "bin": 97.5,
+          "predicted": 0.028184,
+          "observed": 0.01,
+          "count": 100
+        },
+        {
+          "bin": 47.5,
+          "predicted": 0.00912,
+          "observed": 0.01357,
+          "count": 958
+        },
+        {
+          "bin": 62.5,
+          "predicted": 0.012821,
+          "observed": 0.00818,
+          "count": 489
+        },
+        {
+          "bin": 12.5,
+          "predicted": 0.004105,
+          "observed": 0.006683,
+          "count": 6285
+        },
+        {
+          "bin": 17.5,
+          "predicted": 0.004602,
+          "observed": 0.006876,
+          "count": 4654
+        },
+        {
+          "bin": 42.5,
+          "predicted": 0.00814,
+          "observed": 0.006239,
+          "count": 1122
+        },
+        {
+          "bin": 72.5,
+          "predicted": 0.016076,
+          "observed": 0.009375,
+          "count": 320
+        },
+        {
+          "bin": 22.5,
+          "predicted": 0.005159,
+          "observed": 0.00745,
+          "count": 3490
+        },
+        {
+          "bin": 27.5,
+          "predicted": 0.005782,
+          "observed": 0.00915,
+          "count": 2623
+        },
+        {
+          "bin": 2.5,
+          "predicted": 0.003266,
+          "observed": 0.002687,
+          "count": 92683
+        },
+        {
+          "bin": 102.5,
+          "predicted": 0.031503,
+          "observed": 0.020699,
+          "count": 773
+        },
+        {
+          "bin": 32.5,
+          "predicted": 0.006481,
+          "observed": 0.007964,
+          "count": 2009
+        },
+        {
+          "bin": 82.5,
+          "predicted": 0.02014,
+          "observed": 0.030151,
+          "count": 199
+        },
+        {
+          "bin": 57.5,
+          "predicted": 0.011447,
+          "observed": 0.016575,
+          "count": 543
+        },
+        {
+          "bin": 7.5,
+          "predicted": 0.003662,
+          "observed": 0.004287,
+          "count": 8631
+        },
+        {
+          "bin": 87.5,
+          "predicted": 0.022534,
+          "observed": 0,
+          "count": 183
+        },
+        {
+          "bin": 67.5,
+          "predicted": 0.014358,
+          "observed": 0.018421,
+          "count": 380
+        },
+        {
+          "bin": 37.5,
+          "predicted": 0.007263,
+          "observed": 0.014502,
+          "count": 1517
+        },
+        {
+          "bin": 52.5,
+          "predicted": 0.010218,
+          "observed": 0.015038,
+          "count": 798
+        },
+        {
+          "bin": 92.5,
+          "predicted": 0.025205,
+          "observed": 0,
+          "count": 131
+        }
+      ],
+      "score_to_probability": [
+        {
+          "score": 0,
+          "probability": 0.0030842900023853345
+        },
+        {
+          "score": 20,
+          "probability": 0.00487240505945576
+        },
+        {
+          "score": 40,
+          "probability": 0.007689182901780119
+        },
+        {
+          "score": 50,
+          "probability": 0.009653913003683802
+        },
+        {
+          "score": 60,
+          "probability": 0.012114539476403488
+        },
+        {
+          "score": 80,
+          "probability": 0.01903795817877709
+        },
+        {
+          "score": 100,
+          "probability": 0.029798736604907602
+        }
+      ]
+    }
+  },
+  "trackB_liquidationModel": {
+    "status": "INSUFFICIENT_DATA",
+    "liquidation_rows": 0,
+    "recommendation": "Start live ingestion (npm run ingest). Minimum 7 days for B1-B2, 30 days for B3-B4.",
+    "framework_ready": true
+  },
+  "robustness": {
+    "walk_forward": {
+      "train_period": "2025-11-29 → 2026-01-28",
+      "test_period": "2026-01-28 → 2026-02-27",
+      "train_params": {
+        "intercept": -6.745110881988897,
+        "coefficient": 0.0267807647618185
+      },
+      "test_brier": 0.00887589512465862,
+      "test_bss": -0.004577570822356769
+    },
+    "monthly_stability": [
+      {
+        "month": "2025-11",
+        "minutes": 501,
+        "cascades": 0,
+        "avg_score_cascade": 0,
+        "avg_score_normal": 7.1337325349301395,
+        "separation": -7.1337325349301395
+      },
+      {
+        "month": "2025-12",
+        "minutes": 44640,
+        "cascades": 127,
+        "avg_score_cascade": 21.055118110236222,
+        "avg_score_normal": 7.015995327207782,
+        "separation": 14.03912278302844
+      },
+      {
+        "month": "2026-01",
+        "minutes": 44640,
+        "cascades": 69,
+        "avg_score_cascade": 15.869565217391305,
+        "avg_score_normal": 7.073007112247875,
+        "separation": 8.79655810514343
+      },
+      {
+        "month": "2026-02",
+        "minutes": 38364,
+        "cascades": 335,
+        "avg_score_cascade": 16.961194029850745,
+        "avg_score_normal": 6.693786320965579,
+        "separation": 10.267407708885166
+      }
+    ],
+    "threshold_sensitivity": {
+      "optimal": 46,
+      "range": [
+        {
+          "threshold": 41,
+          "f1": 0.02486569455103607
+        },
+        {
+          "threshold": 42,
+          "f1": 0.025131223158899315
+        },
+        {
+          "threshold": 43,
+          "f1": 0.02601251234771156
+        },
+        {
+          "threshold": 44,
+          "f1": 0.026270897304674173
+        },
+        {
+          "threshold": 45,
+          "f1": 0.026845637583892617
+        },
+        {
+          "threshold": 46,
+          "f1": 0.027588743792532646
+        },
+        {
+          "threshold": 47,
+          "f1": 0.02706308366685725
+        },
+        {
+          "threshold": 48,
+          "f1": 0.02575787596592035
+        },
+        {
+          "threshold": 49,
+          "f1": 0.025936599423631124
+        },
+        {
+          "threshold": 50,
+          "f1": 0.026785714285714284
+        },
+        {
+          "threshold": 51,
+          "f1": 0.026060070671378093
+        }
+      ]
+    }
+  },
+  "executiveVerdict": "Model shows weak but non-trivial signal (F1=0.027, BSS=0.525). Average lead time of 13.1 minutes provides actionable warning. Track B (liquidation cascades) blocked on data: live ingestion required. Framework is ready — begin collection with `npm run ingest`."
+}

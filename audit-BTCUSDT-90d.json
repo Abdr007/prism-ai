@@ -1,0 +1,135 @@
+{
+  "structuralIntegrity": {
+    "mark_prices_pk_duplicates": 0,
+    "funding_rates_pk_duplicates": 0,
+    "open_interest_pk_duplicates": 0,
+    "liquidation_id_duplicates": 0,
+    "mark_prices_rows": 129597,
+    "liquidations_rows": 0,
+    "funding_rates_rows": 270,
+    "open_interest_rows": 500,
+    "expected_minutes": 129597,
+    "present_minutes": 129597,
+    "missing_minutes": 0,
+    "longest_consecutive_gap": 0,
+    "coverage_pct": "100.000%",
+    "future_timestamps_mark": 0,
+    "backward_timestamp_jumps": 0,
+    "negative_zero_mark_prices": 0,
+    "negative_open_interest": 0,
+    "funding_out_of_bounds": 0,
+    "mark_price_8sigma_outliers": 0
+  },
+  "timeSeriesQuality": {
+    "return_count": 129596,
+    "return_mean": -0.0000022797767043901387,
+    "return_std": 0.0007265065477082258,
+    "return_skewness": 0.2581665782032579,
+    "return_kurtosis": 30.98319290708618,
+    "fat_tailed": true,
+    "return_percentiles": {
+      "p50": 0,
+      "p90": 0.0006687148027160454,
+      "p95": 0.0010304577699251536,
+      "p99": 0.002107719529906458,
+      "p999": 0.004435114040106344
+    },
+    "return_min": -0.020528498841221345,
+    "return_max": 0.020812409394334142,
+    "flatline_sequences_gt3": 21,
+    "longest_flatline": 5,
+    "jumps_gt_10pct": 0,
+    "worst_jump_pct": "0.0000",
+    "oi_change_count": 499,
+    "oi_change_mean": -0.000007489098389446399,
+    "oi_change_std": 0.0018925398344574456,
+    "oi_spikes_gt15pct": 0,
+    "oi_price_hourly_correlation": 0.9531193521494069,
+    "funding_count": 270,
+    "funding_mean": 0.00003109011111111112,
+    "funding_std": 0.00004447861804072701,
+    "funding_min": -0.00015178,
+    "funding_max": 0.0001,
+    "funding_flat_segments_gt24h": 0,
+    "funding_longest_flat": 2
+  },
+  "liquidationRealism": {
+    "liquidation_count": 0,
+    "status": "NO_DATA"
+  },
+  "microstructureConsistency": {
+    "rv30_mean": 0.0032169184259498414,
+    "rv30_std": 0.002348889113668079,
+    "rv30_tercile_low": 0.0019699569801870796,
+    "rv30_tercile_high": 0.0034103827863174573,
+    "liq_by_vol_tercile": [
+      {
+        "tercile": "1",
+        "count": 0,
+        "volume": 0
+      },
+      {
+        "tercile": "2",
+        "count": 0,
+        "volume": 0
+      },
+      {
+        "tercile": "3",
+        "count": 0,
+        "volume": 0
+      }
+    ],
+    "stress_clustering": false,
+    "liq_spacing_cv": 0,
+    "evenly_spaced": true,
+    "liq_size_cv": 0,
+    "uniform_sizes": true
+  },
+  "cascadeValidation": {
+    "cascade_candidates": 14,
+    "cascades_per_month": {
+      "2026-02": 10,
+      "2026-01": 2,
+      "2025-12": 2
+    },
+    "cascade_monthly_cv": 0.8081220356417685,
+    "cascade_non_uniform": true
+  },
+  "syntheticHeuristics": {
+    "uniform_timestamp_spacing": {
+      "pass": false,
+      "explanation": "Mark price timestamp CV=0.0000. Missing gaps=0. Some gaps expected for real data."
+    },
+    "heavy_tails": {
+      "pass": true,
+      "explanation": "Return kurtosis=30.98. Real BTC futures exhibit kurtosis >> 3."
+    },
+    "distribution_realism": {
+      "pass": true,
+      "explanation": "Return std=7.2651e-4. Zero or near-zero std indicates synthetic flat data."
+    },
+    "liquidation_size_variety": {
+      "pass": true,
+      "explanation": "No liquidation data to evaluate."
+    },
+    "weekend_liquidity_difference": {
+      "pass": true,
+      "explanation": "Weekend/weekday vol ratio=0.5663. Real crypto has 24/7 trading with mild liquidity differences."
+    },
+    "funding_asymmetry": {
+      "pass": true,
+      "explanation": "Funding skewness=-0.9478. Real funding is typically positively skewed (longs pay shorts)."
+    },
+    "oi_curve_roughness": {
+      "pass": true,
+      "explanation": "OI change std=1.8925e-3. Near-zero std indicates synthetic smoothness."
+    },
+    "volatility_clustering": {
+      "pass": true,
+      "explanation": "Squared return autocorr(1)=0.3234. Real markets show strong vol clustering (>0.05)."
+    }
+  },
+  "finalRating": "EXCELLENT (institutional-grade)",
+  "finalScore": 85,
+  "executiveSummary": "Market data (mark prices, funding, OI) is present and has excellent coverage. Liquidation data is absent — this is expected as Binance does not offer a historical liquidation REST API; forward collection via WebSocket (npm run ingest) is required. Available data passes structural integrity checks."
+}
